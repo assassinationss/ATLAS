@@ -330,7 +330,7 @@ run-first 门本身引用一条指令，`runFirstInstruction`：运行该扩展�
 
 | Tier | 最大轮次 | 动作 |
 |------|-----------|--------|
-| T0（对话型） | 5 | 仅文本回复 |
+| T0（对话型） | 12 | 仅文本回复 |
 | T1（简单） | 0（无上限） | 直接写入 —— 无 V3 开销 |
 | T2（功能） | 0（无上限） | 触发 V3 pipeline |
 | T3（困难） | 0（无上限） | 触发 V3 pipeline |
@@ -354,6 +354,29 @@ tier 上限为 0（无上限）；由循环内部的检测器栈决定何时中�
 - 或者该文件具有可识别的源代码 / 标记语言扩展名（`.py`、`.go`、`.rs`、`.ts`、`.tsx`、`.js`、`.jsx`、`.html`、`.htm` 等）且没有触发逻辑指标 —— 在 T2 给予它疑点利益（覆盖诸如 12 行组件骨架这类极简但真实的文件）
 
 **T3（困难）** —— 目前分类器自身从不直接发出 T3；圈复杂度精炼器（`refineTierWithCC`，经由 GH #39 第 2 点的 `/internal/cyclomatic_complexity`）按 McCabe CC *升级*：CC ≥ 8 时升到 T2（包括从 T1 升级），CC ≥ 16 时升到 T3。从不降级。
+
+#### 客户端任务模式
+
+一个请求可以携带 `task_contract.task_mode`，在请求边界处校验（`work` 或 `question`；缺失与"存在但为空"保持可区分）。它做与不做什么：
+
+- **在场即权威**，但仅对一个问题：本请求是否要求一次状态变更。
+- **缺席即回退** —— 由旧有的自然语言启发式照常裁决，行为不变。旧客户端被原样接受；不为其推断或虚构任何模式。
+- **确立的是义务，而非完成。** `work` 模式说的是动作被要求；运行仍须以既有证据证明它 —— 当前哈希的交付物有效性、适用的验证、无未结算的变更债、无存活的后台危害、无失效校验、无阻塞的墓碑或权限缺陷。
+- **不授权任何破坏性操作。** `question` 模式既不允许变更，也不抹除变更债、损坏的交付物、失败的校验、后台危害或删除义务；若模型仍然变更，同样的安全与完成规则管辖那些字节。删除仍需要其自身那绑定路径与身份的确认。
+- **从不到达模型。** 任务模式不出现在任何提示中，任何模型、V3 或 lens 输出都无法设置它。一个内部畸形的模式在失败时闭合到要求工作一侧，而不是被读作问题。
+
+影子诊断记录（私有、仅观测、默认关闭 —— 见 [OPERATIONS.md](../../OPERATIONS.md#private-diagnostics-task-contract-shadow-capture)）**按记录种类**版本化，因为给其中一种加字段不得静默重定义另一种：
+
+| 记录 | 版本 | 契约 |
+| --- | --- | --- |
+| `task_contract_shadow_gate` v1 | 1 | 仅旧有观测：启发式的裁决。任务模式迁移之前采集的封存捕获属于 v1，且始终可被为其编写的分析器读取。 |
+| `task_contract_shadow_gate` v2 | 2 | v1 加上 `live_action_demand`（实际生效的裁决）与 `action_demand_source`（`legacy`、`contract_work`、`contract_question`、`contract_invalid_failed_closed`）。 |
+| `task_contract_shadow_request` | 1 | 未变 |
+| `task_contract_shadow_footer` | 1 | 未变 |
+
+`comparison` 仍描述契约与旧有机制的对比；`influences_live_decision` 仍描述观察者及其 sink 能否影响策略，且保持为 false。一次 schema 变更意味着一个新版本 —— 封闭字段集加一个为它编写的读取器 —— 从不是对既有版本的重定义，也从不是一个对未知字段耸肩放行的解析器。
+
+客户端：TUI 对普通消息发送 `work`，对一次性 `/ask <message>` 发送 `question`；e2e 与可靠性 harness 发送 `work`。VS Code 扩展尚不发送契约，因此其请求不获得 V3 候选（[CANDIDATE_POLICY.md](../../CANDIDATE_POLICY.md)）。`expected_outputs` 与 `verification` 会被携带与校验，但**尚未迁移** —— 交付物与验证义务仍按旧方式推导。
 
 ### Plan 模式（按轮次预检）
 
@@ -562,7 +585,7 @@ C(x) 的归一化是 `sigmoid(steepness × (energy - midpoint))`。所选模型�
 
 **代理的直接 Lens 调用携带自己的调用身份。** 代理在一条模型侧路径上直接与 Lens 通信，逐写打分（`/internal/lens/score-per-step`），它不是一次 V3 候选调用。唯一属主 `proxy/lens_identity.go` 构建这些请求，并把绑定的 `X-ATLAS-Request-ID` 与一个仅由该请求 id 派生的、代理所有的 Lens 调用身份盖在一起：`proxy-lens:` 后跟 `sha256("atlas/proxy-lens-invocation/v1\n" + request_id)` 的前 32 个十六进制位。它是确定性的（relay 可以在任何模型侧流量之前注册该对），同一请求内的每次直接 Lens 调用相同，跨请求且区别于 V3 的 UUID 调用，且只从类型化的请求 id 派生：绝不来自散文、路径、候选字节、工具参数或模型输出，也绝不可由模型设置。它走既有的 `X-ATLAS-V3-Invocation-ID` 通道；标头名是历史遗留，值是通用的模型侧调用身份。它是一个范围标签而非凭证：没有任何东西读取它来授权一次变更、权限、候选或完成，它也从不出现在 SSE 事件、工具结果、提示或日志中。缺席或超出封闭格式（`[A-Za-z0-9._:-]{1,128}`）的请求 id 不派生调用身份。封闭的规范与向量位于 `proxy/testdata/lens_invocation_vectors.json`。
 
-**嵌入容量边界。** llama-server 在单个物理批次（`-ub`，`ATLAS_UBATCH`）中处理一次 `/embedding` 请求，并拒绝更长的输入；Lens 的每次打分都是对整个序列的一次前向。该拒绝是部署的传输限制而非对文本的评判，它与每个分数分开存放：回答以 `scored: false` 连同每个分数字段中的 `null` 与一个类型化的 `failure`（`embed_capacity`，带服务器的 `input_tokens` 与 `capacity_tokens`、`model_server_error`、`model_server_unreachable`、`embedding_contract`、NaN 或无穷值的 `nonfinite_score`、`internal`）。服务路径上不做任何截断或切分，因为切分过的输入不是工件拟合时的那个向量。v3-service 把该失败记在候选上，将其排在每个已打分者之后，只作为最后存留的已验证候选交付；代理对未打分的写入不施加任何阈值。Lens 知道的容量（经 `LLAMA_EMBED_CAPACITY_TOKENS` 声明，或从一次拒绝中观测）报告于 `/health` 与 `/ready`，且当它低于代理的生成上限时，以状态维度中的 `lens_scoring: partial` 呈现。决策记录：[ADR 0010](adr/0010-lens-capacity-boundary-is-typed.md)。
+**嵌入容量边界。** llama-server 在单个物理批次（`-ub`，`ATLAS_UBATCH`）中处理一次 `/embedding` 请求，并拒绝更长的输入；Lens 的每次打分都是对整个序列的一次前向。该拒绝是部署的传输限制而非对文本的评判，它与每个分数分开存放：回答以 `scored: false` 连同每个分数字段中的 `null` 与一个类型化的 `failure`（`embed_capacity`，带服务器的 `input_tokens` 与 `capacity_tokens`、`model_server_error`、`model_server_unreachable`、`embedding_contract`、NaN 或无穷值的 `nonfinite_score`、`internal`）。服务路径上不做任何截断或切分，因为切分过的输入不是工件拟合时的那个向量。v3-service 把该失败记在候选上，将其排在每个已打分者之后，只作为最后存留的已验证候选交付；代理对未打分的写入不施加任何阈值。Lens 知道的容量（经 `LLAMA_EMBED_CAPACITY_TOKENS` 声明，或从一次拒绝中观测）报告于 `/health` 与 `/ready`，且当它低于代理的生成上限时，以状态维度中的 `lens_scoring: partial` 呈现。决策记录：[ADR 0010](../../adr/0010-lens-capacity-boundary-is-typed.md)。
 
 
 > **注意：** 模型权重（.pt、.pkl 文件）未提交到仓库 —— 它们在训练期间构建，并烘焙进容器镜像或在运行时挂载。当模型文件缺失时，服务会优雅降级：C(x) 返回中性能量，G(x) 返回 `gx_score: 0.5` 和 `verdict: "unavailable"`。训练数据与权重可在 [HuggingFace](https://huggingface.co/datasets/itigges22/ATLAS) 获取。
