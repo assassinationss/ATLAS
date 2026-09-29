@@ -19,7 +19,7 @@ The hybrid keeps the rest of ATLAS unchanged from the Linux + CUDA/ROCm path whi
 | Xcode Command Line Tools | cmake, git, metal-cpp headers | `xcode-select --install` |
 | Homebrew | brew package manager | https://brew.sh |
 | pipx | install atlas CLI in an isolated venv (Homebrew Python enforces PEP 668, plain `pip install` is blocked) | `brew install pipx` (the setup script handles this automatically) |
-| Go 1.26.2+ | build the atlas-tui binary (Bubbletea TUI client invoked by `atlas`) | `brew install go` (the setup script handles this automatically) |
+| Go 1.26.6+ | build the atlas-tui binary (Bubbletea TUI client invoked by `atlas`) | `brew install go` (the setup script handles this automatically) |
 | Docker Desktop | runs the 4 non-inference services | https://docker.com/products/docker-desktop |
 
 Notes:
@@ -231,6 +231,10 @@ Unified memory is shared with the OS. Realistic GPU budget on Apple Silicon is ~
 - 16 GB Mac: stick to 7B-Q4 (~4 GB) or 9B-Q4_K_M (~5.5 GB)
 - 32 GB Mac: 9B-Q6 (~7.5 GB) or 14B-Q5 (~10 GB) fits comfortably
 - 64 GB+ Mac: 32B-Q5 (~22 GB) or larger
+
+Only a model with its own Lens bundle runs agent work out of the box;
+`atlas model list` shows which ones have one. For any other model, build
+a bundle first: `atlas bench`, then `atlas lens build --from-results`.
 
 Run `atlas tier` to see the recommendation for your hardware.
 

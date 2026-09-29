@@ -34,11 +34,11 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          # 1.26 covers both modules (tui requires 1.26+ via go.mod;
+          # 1.26.6 covers both modules (tui requires 1.26.6+ via go.mod;
           # proxy's 1.24 floor builds fine on it). setup-go v6 pins
           # GOTOOLCHAIN=local, so the version here must satisfy every
           # module — no auto-fetch.
-          go-version: '1.26'
+          go-version: '1.26.6'
           cache-dependency-path: ${{ matrix.module }}/go.sum
 
       - name: go test -race
@@ -85,15 +85,17 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             **/requirements*.txt
+            .github/requirements/ci.txt
 
       - name: install
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          # pyyaml: tests/contracts/test_openapi_contract.py importorskips
-          # yaml — without the install the whole route-parity contract
-          # silently skips instead of gating.
-          pip install pytest pyyaml
+          # The CLI is stdlib-only, so --no-deps installs everything it needs.
+          # pytest and pyyaml come from the hashed tool lock (ci.in lists
+          # them; scripts/ci-lock.sh regenerates it). pyyaml:
+          # tests/contracts/test_openapi_contract.py importorskips yaml —
+          # without it the whole route-parity contract silently skips.
+          pip install --require-hashes -r .github/requirements/ci.txt
+          pip install --no-deps -e .
           # tree-sitter + grammars for the call-graph/structural_edit tests
           # under tests/v3-service/, at the exact pins the image ships —
           # an unpinned install once pulled a newer tree-sitter whose API
@@ -121,7 +123,7 @@ jobs:
         # service requirements. xgboost tests importorskip if absent, but
         # requirements.txt pins xgboost-cpu so they run here.
         run: |
-          pip install torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
           pip install -r geometric-lens/requirements.txt
 
       - name: pytest
@@ -134,7 +136,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
           cache-dependency-path: proxy/go.sum
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
@@ -181,12 +183,12 @@ jobs:
         # referenced before assignment) stay on. Tighten later by removing
         # entries from --ignore as the codebase gets cleaner.
         run: |
-          pip install ruff
+          pip install --require-hashes -r .github/requirements/ci.txt
           python scripts/production-readiness.py --only ruff
 
       - name: mypy (typed modules)
         run: |
-          pip install mypy
+          pip install --require-hashes -r .github/requirements/ci.txt
           python scripts/production-readiness.py --only mypy-typed
 
   shellcheck:
@@ -231,8 +233,20 @@ jobs:
 
       - name: yamllint
         run: |
-          pip install yamllint
+          pip install --require-hashes -r .github/requirements/ci.txt
           python scripts/production-readiness.py --only workflow-yaml
+
+  code-health:
+    name: code health (size)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: function and file size against the baseline
+        # docs/CODE_STYLE.md: no new function over 100 lines or file over
+        # 1,500, and nothing on .github/code-health-baseline.json grows.
+        # Standard library only; the runner's python3 is enough.
+        run: python3 scripts/code_health.py
 
   e2e-acceptance:
     # Deterministic end-to-end acceptance tests (tests/e2e/): real proxy
@@ -253,7 +267,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: '1.26'
+          go-version: '1.26.6'
           cache-dependency-path: proxy/go.sum
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -263,15 +277,15 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             **/requirements*.txt
+            .github/requirements/ci.txt
 
       - name: build proxy
         run: cd proxy && go build -o /tmp/test-atlas-proxy .
 
       - name: install
         run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install pytest
+          pip install --require-hashes -r .github/requirements/ci.txt
+          pip install --no-deps -e .
           pip install -r sandbox/requirements-runtime.txt
 
       - name: e2e acceptance test
@@ -410,9 +424,11 @@ jobs:
           # hand-escaped copies of these two curls in the first place.
           body="$(python3 -c 'import json,os; print(json.dumps({"code": os.environ["CODE"], "language": os.environ["LANGUAGE"]}))')"
           for endpoint in execute syntax-check; do
+            # Save the reply, then check it: nothing downloaded is piped
+            # into an interpreter.
             curl -sf -X POST "http://localhost:8020/$endpoint" \
-              -H 'Content-Type: application/json' -d "$body" \
-              | ENDPOINT="$endpoint" python3 -c "import sys,json,os; e=os.environ['ENDPOINT']; d=json.load(sys.stdin); k='success' if e=='execute' else 'valid'; assert d[k], d; print(f'PASS: /{e}')"
+              -H 'Content-Type: application/json' -d "$body" -o reply.json
+            ENDPOINT="$endpoint" python3 -c "import json,os; e=os.environ['ENDPOINT']; d=json.load(open('reply.json')); k='success' if e=='execute' else 'valid'; assert d[k], d; print(f'PASS: /{e}')"
           done
       - name: cleanup
         if: always()

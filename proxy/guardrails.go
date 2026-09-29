@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -758,9 +759,9 @@ func replyDefersWork(text string) bool {
 			if len(window) > 60 {
 				window = window[:60]
 			}
+			window = trimReplyLeadIns(window) // "i will try to read" defers as "i will read" does
 			for _, v := range verbs {
-				if strings.HasPrefix(strings.TrimPrefix(strings.TrimPrefix(window, "now "), "first "), v) ||
-					strings.HasPrefix(window, "now "+v) || strings.HasPrefix(window, "next "+v) {
+				if strings.HasPrefix(window, v) {
 					return true
 				}
 			}
@@ -979,17 +980,65 @@ func sessionWriteHashes(ctx *AgentContext) map[string]string {
 // in what was verified — passed to an interpreter, a test runner, or a
 // grader as an argument. Substring matching is deliberately avoided:
 // "solve.py" must not match "solve.py.bak".
+//
+// Three common shapes named their files without a plain token, so a run that
+// verified them bound nothing: a subshell, `(cd app && python main.py)`, whose
+// token keeps the parenthesis; a glob, `javac *.java`; and a Java class run,
+// `java Main` or `java com.example.Main`, which names the class, not
+// Main.java. Shell punctuation is trimmed from tokens, a glob token matches
+// the files it would expand to, and after `java` a class name matches its
+// source file.
 func commandNamesPath(command, path string) bool {
 	base := filepath.Base(path)
+	class := ""
+	if strings.HasSuffix(base, ".java") {
+		class = strings.TrimSuffix(base, ".java")
+	}
 	for _, segment := range splitShellSegments(command) {
-		for _, tok := range strings.Fields(segment) {
-			tok = strings.Trim(tok, `"'`)
+		fields := strings.Fields(segment)
+		javaRun := false
+		for i, tok := range fields {
+			tok = strings.Trim(tok, "\"'()`{};")
+			if tok == "" {
+				continue
+			}
 			if tok == path || tok == base || strings.HasSuffix(tok, "/"+base) {
+				return true
+			}
+			if strings.ContainsAny(tok, "*?[") && globNamesPath(tok, path) {
+				return true
+			}
+			if i == 0 || (!javaRun && filepath.Base(tok) == "java") {
+				javaRun = filepath.Base(tok) == "java"
+				continue
+			}
+			if javaRun && class != "" && !strings.HasPrefix(tok, "-") &&
+				(tok == class || strings.HasSuffix(tok, "."+class)) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// globNamesPath reports whether a shell glob from a command line would expand
+// to path. A changed path is often absolute (the resolved form sits beside
+// the one the model sent), and a relative glob is relative to where the
+// command ran, so the glob is matched against as many trailing components of
+// the path as it has: `src/*.java` against `.../src/Util.java`.
+func globNamesPath(glob, path string) bool {
+	glob = strings.TrimPrefix(glob, "./")
+	if filepath.IsAbs(glob) {
+		ok, _ := filepath.Match(glob, path)
+		return ok
+	}
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	n := strings.Count(glob, "/") + 1
+	if n > len(parts) {
+		return false
+	}
+	ok, _ := filepath.Match(glob, strings.Join(parts[len(parts)-n:], "/"))
+	return ok
 }
 
 // coverageFromLiveServer credits a probe with the files whose code is actually
@@ -1631,6 +1680,163 @@ func unreadCitationMessage(paths []string) string {
 		"If you are not sure which file holds the problem, search_files for the relevant symbol " +
 			"across the whole directory rather than picking the file whose name matches the question.")
 	return b.String()
+}
+
+// codeRefRe matches a code reference in backticks: `name`, `name()`,
+// `module.name`.
+var codeRefRe = regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)(?:\\(\\))?`")
+
+// fileExtensionWords are the last parts of a backticked file name
+// (`config.json`), which name a file, not code.
+var fileExtensionWords = map[string]bool{
+	"json": true, "yaml": true, "yml": true, "toml": true, "html": true, "txt": true,
+	"java": true, "tsx": true, "jsx": true, "cpp": true, "php": true, "css": true,
+}
+
+// unshownSymbol is code a reply names whose definition no read showed.
+type unshownSymbol struct {
+	Name  string
+	File  string // as the workspace names it
+	Line  int    // the definition's line
+	Spans [][2]int
+}
+
+// unshownSymbolCitations returns the code a reply names whose definition the
+// run never showed. unreadFileCitations works per file: any read of a file
+// counts there as seeing all of it, but a truncated or ranged read shows only
+// part. Smoke run 2026-09-27 (bugfind_tiebreak): both reads stopped near line
+// 190, the reply named `_score_plan`, which it said lay "past the provided
+// snippet", and the run ended completed.
+//
+// The predicate matches the file-level one: existence plus absence of
+// evidence. The name must be defined in a file the run read only in part, at a
+// line no read showed, and nowhere a read did show it.
+func unshownSymbolCitations(ctx *AgentContext, text string) []unshownSymbol {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	paths := ctx.bodySeenPaths()
+	partial := false
+	for _, p := range paths {
+		if ctx.ShownSpans(p) != nil {
+			partial = true
+			break
+		}
+	}
+	if !partial {
+		return nil
+	}
+	sources := map[string]string{}
+	var out []unshownSymbol
+	seen := map[string]bool{}
+	for _, m := range codeRefRe.FindAllStringSubmatch(text, -1) {
+		name := m[1]
+		if i := strings.LastIndexByte(name, '.'); i >= 0 {
+			name = name[i+1:]
+		}
+		if len(name) < 3 || seen[name] || fileExtensionWords[strings.ToLower(name)] {
+			continue
+		}
+		seen[name] = true
+		var gap *unshownSymbol
+		shown := false
+		for _, p := range paths {
+			src, ok := sources[p]
+			if !ok {
+				data, err := os.ReadFile(p)
+				if err != nil {
+					continue
+				}
+				src = string(data)
+				sources[p] = src
+			}
+			for _, line := range definitionLines(src, name) {
+				if ctx.LineWasShown(p, line) {
+					shown = true
+					break
+				}
+				if gap == nil {
+					gap = &unshownSymbol{Name: name, File: workspaceName(ctx, p), Line: line,
+						Spans: ctx.ShownSpans(p)}
+				}
+			}
+			if shown {
+				break
+			}
+		}
+		if gap != nil && !shown {
+			out = append(out, *gap)
+			if len(out) == maxCitedPaths {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// definitionLines returns the 1-based lines of source that define name: a
+// def, class, func, function, fn or type line, at any indent.
+func definitionLines(source, name string) []int {
+	re := regexp.MustCompile(`^\s*(?:export\s+)?(?:(?:async|static|public|private|protected|pub)\s+)*` +
+		`(?:def|class|function|fn|type|func(?:\s*\([^)]*\))?)\s+` + regexp.QuoteMeta(name) + `\b`)
+	var out []int
+	for i, ln := range strings.Split(source, "\n") {
+		if re.MatchString(ln) {
+			out = append(out, i+1)
+		}
+	}
+	return out
+}
+
+// workspaceName is how the model names a file: relative to the workspace.
+func workspaceName(ctx *AgentContext, path string) string {
+	if rel, err := filepath.Rel(ctx.WorkingDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return filepath.Base(path)
+}
+
+// unshownSymbolMessage tells the model which code it described without being
+// shown it, and where that code is.
+func unshownSymbolMessage(gaps []unshownSymbol) string {
+	var b strings.Builder
+	b.WriteString("Your reply describes code this session has not shown you. ")
+	for _, g := range gaps {
+		fmt.Fprintf(&b, "`%s` is defined at line %d of %s, and the reads so far showed only %s of that file. ",
+			g.Name, g.Line, g.File, lineSpanText(g.Spans))
+	}
+	b.WriteString("A truncated or ranged read shows only part of a file, so what you say about the rest " +
+		"is a guess. Read the lines you are describing (read_file with offset and limit), then answer " +
+		"from what the code actually says.")
+	return b.String()
+}
+
+// symbolNames lists the names in gaps, for logs and the unresolved note.
+func symbolNames(gaps []unshownSymbol) string {
+	names := make([]string, len(gaps))
+	for i, g := range gaps {
+		names[i] = "`" + g.Name + "`"
+	}
+	return strings.Join(names, ", ")
+}
+
+// lineSpanText renders line spans as "lines 1-189 and 400-420".
+func lineSpanText(spans [][2]int) string {
+	if len(spans) == 0 {
+		return "no lines"
+	}
+	parts := make([]string, len(spans))
+	for i, s := range spans {
+		if s[0] == s[1] {
+			parts[i] = strconv.Itoa(s[0])
+		} else {
+			parts[i] = fmt.Sprintf("%d-%d", s[0], s[1])
+		}
+	}
+	if len(parts) == 1 {
+		return "lines " + parts[0]
+	}
+	return "lines " + strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
 }
 
 // isExplainOnlyMessage reports an explicit "tell me, do not touch it"
@@ -2886,6 +3092,21 @@ func planIncompleteMessage(ctx *AgentContext) string {
 			"unnecessary or already satisfied by an edit you made under a different step, say "+
 			"which in your next `done` summary rather than leaving it silent.",
 		countTrue(ctx.PlanStepsSatisfied), len(ctx.Plan.Steps), strings.Join(missing, "\n"))
+}
+
+// planOwesRun reports whether the plan gate would send this exit back for a
+// step that runs a command. Such a step may need a job the run started: a
+// probe of a server needs the server.
+func planOwesRun(ctx *AgentContext) bool {
+	if planIncompleteMessage(ctx) == "" {
+		return false
+	}
+	for i, step := range ctx.Plan.Steps {
+		if !ctx.PlanStepsSatisfied[i] && (step.Action == "run_command" || step.Action == "run_background") {
+			return true
+		}
+	}
+	return false
 }
 
 // reForegroundServer matches commands that serve until killed. Deliberately

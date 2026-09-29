@@ -293,6 +293,77 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 			})
 		}
 
+	case "fenced_fetch":
+		// One attempt to fetch a file body through the fenced channel (#254):
+		// how it went and what the wire showed, so a stall has a visible
+		// cause instead of a pause.
+		var p struct {
+			Path           string `json:"path"`
+			Attempt        int    `json:"attempt"`
+			Grammar        string `json:"grammar"`
+			Outcome        string `json:"outcome"`
+			ElapsedMS      int64  `json:"elapsed_ms"`
+			ContentChars   int    `json:"content_chars"`
+			ReasoningChars int    `json:"reasoning_chars"`
+			Cut            string `json:"cut"`
+		}
+		if json.Unmarshal(ev.Data, &p) != nil {
+			break
+		}
+		body := fmt.Sprintf("fenced %s, attempt %d (%s): %s, %d chars in %.1fs",
+			p.Path, p.Attempt, p.Grammar, p.Outcome, p.ContentChars, float64(p.ElapsedMS)/1000)
+		if p.Cut != "" {
+			body += ", cut by the " + strings.ReplaceAll(p.Cut, "_", "-") + " watchdog"
+		}
+		if p.ReasoningChars > 0 {
+			body += fmt.Sprintf(", %d reasoning chars", p.ReasoningChars)
+		}
+		m.chat = append(m.chat, chatMessage{
+			Role: roleSystem, Meta: "fenced", Body: body, Echo: true,
+		})
+
+	case "repair":
+		// A file the session left unparseable (#214): shown when it opens,
+		// when an attempt changes it and it still fails, when it is fixed,
+		// and when it is handed back. A refused attempt changed nothing and
+		// is not shown.
+		var p struct {
+			Event    string `json:"event"`
+			Path     string `json:"path"`
+			Tool     string `json:"tool"`
+			Landed   bool   `json:"landed"`
+			Error    string `json:"error"`
+			How      string `json:"how"`
+			Attempts int    `json:"attempts"`
+		}
+		if json.Unmarshal(ev.Data, &p) != nil {
+			break
+		}
+		attempts := fmt.Sprintf("%d attempts", p.Attempts)
+		if p.Attempts == 1 {
+			attempts = "1 attempt"
+		}
+		var body string
+		switch {
+		case p.Event == "opened":
+			body = fmt.Sprintf("%s does not parse: %s", p.Path, p.Error)
+		case p.Event == "attempt" && p.Landed:
+			body = fmt.Sprintf("%s still does not parse after %s: %s", p.Path, p.Tool, p.Error)
+		case p.Event == "closed" && p.How == "parses":
+			body = fmt.Sprintf("%s parses again (%s)", p.Path, attempts)
+		case p.Event == "closed" && p.How == "removed":
+			body = fmt.Sprintf("%s was removed", p.Path)
+		case p.Event == "closed":
+			body = fmt.Sprintf("%s changed; no parse check could run", p.Path)
+		case p.Event == "handoff":
+			body = fmt.Sprintf("%s still does not parse after %s: handed back to you", p.Path, attempts)
+		}
+		if body != "" {
+			m.chat = append(m.chat, chatMessage{
+				Role: roleSystem, Meta: "repair", Body: body, Echo: true,
+			})
+		}
+
 	case "permission_request":
 		var p struct {
 			ToolName    string          `json:"tool_name"`
@@ -365,15 +436,22 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 		})
 
 	case "done":
+		// The run's outcome, not only its summary (#236): whether it
+		// completed, stopped or failed is what a user needs at a glance. A
+		// missing status reads as incomplete, as docs/API.md says.
 		var p struct {
 			Summary string `json:"summary"`
+			Status  string `json:"status"`
+			Reason  string `json:"reason"`
 		}
 		_ = json.Unmarshal(ev.Data, &p)
-		if p.Summary != "" {
-			m.chat = append(m.chat, chatMessage{
-				Role: roleSystem, Meta: "done", Body: p.Summary,
-			})
+		if p.Status == "" {
+			p.Status = "incomplete"
 		}
+		m.chat = append(m.chat, chatMessage{
+			Role: roleSystem, Meta: "done", Body: p.Summary,
+			Status: p.Status, Reason: p.Reason,
+		})
 
 	case "v3_llm_start":
 		// V3 is starting an LLM call. Insert a dim "v3-llm" row that
@@ -604,6 +682,20 @@ func (m *tuiModel) appendChatEvent(ev chatEvent) {
 		m.chat = append(m.chat, chatMessage{
 			Role: roleSystem, Meta: "cut",
 			Body: fmt.Sprintf("content loop detected — stream cut after %d chars", p.Chars),
+		})
+
+	// Stream cut: an edit_file old_str had stopped matching its file and was
+	// still arriving (#215), so the call could not succeed.
+	case "old_str_cut":
+		var p struct {
+			Path         string `json:"path"`
+			MatchedLines int    `json:"matched_lines"`
+		}
+		_ = json.Unmarshal(ev.Data, &p)
+		m.chat = append(m.chat, chatMessage{
+			Role: roleSystem, Meta: "cut",
+			Body: fmt.Sprintf("edit_file old_str stopped matching %s after %d line(s) — stream cut",
+				p.Path, p.MatchedLines),
 		})
 
 	// The other half of content_loop_cut: the cut was ANSWERED rather than

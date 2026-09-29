@@ -278,6 +278,11 @@ type runState struct {
 	// rewriting an already-valid file took that gate at turn 1. Go through
 	// markWarnedRun and the value is never anything but true.
 	pendingWarnedRun map[string]bool
+	// repairs are the files this session left unparseable, keyed by
+	// ledgerKey, with what was tried on each (repair.go). repairOrder keeps
+	// the order they opened in, for stable messages.
+	repairs     map[string]*repairState
+	repairOrder []string
 	// contentLoopRecoveries counts the times this run has answered a
 	// repetition cut with a corrective instead of ending. Bounded, so a
 	// model that will not stop repeating still terminates.
@@ -449,13 +454,33 @@ func (s *runState) bounce(ctx *AgentContext, toolName, rejection string) {
 		"turn":   s.turn,
 		"reason": truncateStr(rejection, 200),
 	})
+	// A refusal is a tool result too, so it names what is still unparseable.
+	// The repair gate's own message already does.
+	note := s.repairNote()
+	if toolName == "repair_gate" {
+		note = ""
+	}
 	ctx.Messages = append(ctx.Messages, AgentMessage{Role: "assistant", Content: s.response})
 	ctx.Messages = append(ctx.Messages, AgentMessage{
 		Role:       "tool",
-		Content:    fmt.Sprintf(`{"success":false,"error":%q}`, rejection),
+		Content:    bounceContent(rejection, note),
 		ToolCallID: fmt.Sprintf("call_%d", s.turn),
 		ToolName:   toolName,
 	})
+}
+
+// bounceContent is a refusal's tool message: the legacy two-key shape, and
+// open_repair while a file this session wrote does not parse (#214).
+func bounceContent(rejection, openRepair string) string {
+	if openRepair == "" {
+		return fmt.Sprintf(`{"success":false,"error":%q}`, rejection)
+	}
+	b, _ := json.Marshal(struct {
+		Success    bool   `json:"success"`
+		Error      string `json:"error"`
+		OpenRepair string `json:"open_repair"`
+	}{false, rejection, openRepair})
+	return string(b)
 }
 
 // bounceToolCall is bounce for a rejection that lands AFTER the tool_call
@@ -522,6 +547,15 @@ func (s *runState) observeVerification(ctx *AgentContext, userMessage string, tu
 			turn, truncateStr(command, 60))
 	case !result.Success:
 		s.observeFailedCheck(ctx, turn, command, ev, result)
+	case ev.Kind.verifies() && !declared && inlineCodeTouchesNothing(ctx, ev):
+		// Inline code that neither names nor imports a file this session
+		// changed ran nothing the work is made of, so it neither verifies nor
+		// clears a failure. `python -c "print(1)"` passed the fix-intent gate
+		// and cleared an earlier red run of the real program.
+		s.uncountedCheck = uncountedNote(command,
+			"the inline code it ran touches no file this session changed. Run the program or its tests.")
+		log.Printf("[agent] inline code touched no changed file, not verification: %q",
+			truncateStr(command, 60))
 	case ev.Kind.verifies() && silentRunWhenOutputPromised(ctx, userMessage, command, result.Data):
 		// Exit 0 with empty stdout is not verification of a task whose
 		// prompt demands printed output. Measured: a generation drifted into
@@ -699,6 +733,21 @@ func (s *runState) exitGates(ctx *AgentContext, userMessage, claimText string) (
 	if ctx != nil && ctx.ShellEffectsUnobserved {
 		s.gateUnresolved("shell_observation", "the workspace was too large to observe every file the shell commands changed")
 	}
+	// A file this session left unparseable is an open repair, and the work is
+	// not finished while one is open (repair.go). First, because it is the
+	// most concrete fact there is about the work. Bounded like every exit
+	// gate: past the bounces, finalizeCompletion ends the run
+	// repair_unfinished and the final message hands the file to the user
+	// with what was tried.
+	s.refreshRepairs(ctx, s.turn, "")
+	if open := s.openRepairs(); len(open) > 0 {
+		if s.continuationFits(ctx) && s.chargeBounce("repair_gate") {
+			log.Printf("[agent] repair gate: %s does not parse (bounce %d/%d)",
+				repairNames(open), s.gateBounces["repair_gate"], maxGateBounces)
+			return "repair_gate", repairGateMessage(open)
+		}
+		s.gateUnresolved("repair_gate", repairNames(open)+" does not parse")
+	}
 	if promisesMoreContent(claimText) {
 		if s.continuationFits(ctx) && s.chargeBounce("intent_gate") {
 			log.Printf("[agent] intent gate: bouncing a reply that promised content it did not deliver (bounce %d/%d)",
@@ -771,6 +820,16 @@ func (s *runState) exitGates(ctx *AgentContext, userMessage, claimText string) (
 		}
 		s.gateUnresolved("evidence_gate", "the reply cites "+strings.Join(cited, ", ")+", which this run never read")
 	}
+	// The same claim one level down: the file was opened, but a truncated or
+	// ranged read never showed the code the reply describes.
+	if gaps := unshownSymbolCitations(ctx, claimText); len(gaps) > 0 {
+		if s.chargeBounce("evidence_gate") {
+			log.Printf("[agent] evidence gate: bouncing exit at turn %d — reply describes %s, which no read showed (bounce %d/%d)",
+				s.turn, symbolNames(gaps), s.gateBounces["evidence_gate"], maxGateBounces)
+			return "evidence_gate", unshownSymbolMessage(gaps)
+		}
+		s.gateUnresolved("evidence_gate", "the reply describes "+symbolNames(gaps)+", whose code this run never showed")
+	}
 	// An investigation that answers for less than it opened. Only for a
 	// read-only run whose request named several files (investigationScopeUnmet),
 	// and only after the reply has been judged by the gates above, so a
@@ -793,6 +852,10 @@ func (s *runState) exitGates(ctx *AgentContext, userMessage, claimText string) (
 	// finding: warned state must be a terminal integrity condition, not a
 	// rewrite throttle).
 	for p := range s.pendingWarnedRun {
+		if s.repairOpenFor(ctx, p) {
+			// The repair gate owns a file that still does not parse.
+			continue
+		}
 		if s.chargeBounce("run_first_gate") {
 			log.Printf("[agent] run-first gate at exit: %s warned and never executed (bounce %d/%d)",
 				p, s.gateBounces["run_first_gate"], maxGateBounces)
@@ -846,10 +909,19 @@ func (s *runState) exitGates(ctx *AgentContext, userMessage, claimText string) (
 	// is weakened: once verification lands, this gate fires, and
 	// finalizeCompletion still refuses completion while a job of the run's own
 	// is live.
+	//
+	// A planned step that runs a command is owed the same way. Smoke run
+	// 2026-09-27 (flask_pause rep 1): the probe on the app's real port passed
+	// but did not match the planned one, this gate had the run stop the
+	// server, and the plan gate then demanded the probe, which could no longer
+	// pass. The run ended "stopped" with working code on disk. The yield lasts
+	// only while the plan gate has bounces left, so a spent plan gate cannot
+	// hold the job open.
 	contractDemand := decideVerificationDemand(ctx, ctx.TaskContract, s.expectedOutputs)
 	contractOwed := contractDemand.Required && !contractDemand.Met
 	verificationOwed := ((s.userWantsVerification || s.sawFailedVerification) && !s.verifiedThisLoop) || contractOwed
-	if live := settleBackgroundHazard(ctx); len(live) > 0 && !verificationOwed && s.chargeBounce("background_gate") {
+	planRunOwed := planOwesRun(ctx) && s.gateBounces["plan_gate"] < maxGateBounces
+	if live := settleBackgroundHazard(ctx); len(live) > 0 && !verificationOwed && !planRunOwed && s.chargeBounce("background_gate") {
 		log.Printf("[agent] background gate: %d job(s) still running at exit (bounce %d/%d)",
 			len(live), s.gateBounces["background_gate"], maxGateBounces)
 		return "background_gate", backgroundStopMessage(ctx, live)
@@ -891,7 +963,7 @@ func (s *runState) exitGates(ctx *AgentContext, userMessage, claimText string) (
 			s.turn, gateTrigger(s.userWantsVerification, s.sawFailedVerification), s.gateBounces["verification_gate"], maxGateBounces)
 		staleJob, staleFile := staleServingJob(ctx)
 		if staleJob != "" {
-			log.Printf("[agent] job %s predates the last change to %s — probing it would not show it", staleJob, staleFile)
+			log.Printf("[agent] job %s predates the last change to %s — probing it would not show it", logPath(staleJob), logPath(staleFile))
 		}
 		return "verification_gate", verificationRejectionFor(
 			s.sawFailedVerification, s.serverStartBlocked, anyBackgroundJobID(ctx), s.redRunStreak,
@@ -908,7 +980,7 @@ func (s *runState) exitGates(ctx *AgentContext, userMessage, claimText string) (
 		if staleJob, staleFile := staleServingJob(ctx); staleJob != "" {
 			if s.chargeBounce("verification_gate") {
 				log.Printf("[agent] the probe that verified this loop hit job %s, started before the last change to %s (bounce %d/%d)",
-					staleJob, staleFile, s.gateBounces["verification_gate"], maxGateBounces)
+					logPath(staleJob), logPath(staleFile), s.gateBounces["verification_gate"], maxGateBounces)
 				return "verification_gate", verificationRejectionFor(false, false, "", 0, "", staleJob, staleFile)
 			}
 			// The probe answered for older code, so nothing verified this.
@@ -998,7 +1070,7 @@ func (s *runState) gateUnresolved(gate, finding string) {
 		s.unresolvedGates = map[string]string{}
 	}
 	s.unresolvedGates[gate] = finding
-	log.Printf("[agent] %s: bounces spent and the finding still holds: %s", gate, truncateStr(finding, 160))
+	log.Printf("[agent] %s: bounces spent and the finding still holds: %s", gate, logPath(truncateStr(finding, 160)))
 }
 
 // unresolvedReasons are the spent gates whose finding is a fact about the
@@ -1626,6 +1698,11 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 					"getting truncated. Try a more targeted request (e.g. 'edit just the " +
 					"@app.route(\"/product\") handler in app.py') so the response stays under the " +
 					"token cap."
+				if ctx.LastStreamCut == "old_str_unmatched" {
+					summary = "Stopped: three edit_file calls in a row ran old_str past the text in " +
+						"the file, and each was cut before it was sent. Nothing was changed by them. " +
+						"Ask again and name the line to change, or ask for replace_lines with line numbers."
+				}
 				if ctx.LastStreamCut == "content_loop" {
 					// Same misdiagnosis the classifier used to make: the token cap
 					// had nothing to do with it. The model began repeating itself
@@ -2088,6 +2165,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 							wfInput.Content = inline
 							log.Printf("[agent] fenced sentinel stripped for %s (%d bytes arrived inline)", wfInput.Path, len(inline))
 						} else {
+							stallsBefore := ctx.FencedStalls
 							fetched, ferr := fetchFencedContent(ctx, rawResponseForFence(parsed), wfInput.Path)
 							if ferr != nil {
 								log.Printf("[agent] fenced-content fetch failed for %s: %v", wfInput.Path, ferr)
@@ -2113,9 +2191,16 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 									// The channel is off for the rest of the run;
 									// telling the model to try fenced again would
 									// only stall. Steer it to inline, the safe path.
+									// Say where the stall was: this fetch's own
+									// stall used to be reported as "earlier in
+									// this run" (#254).
+									when := "stalled earlier in this run"
+									if ctx.FencedStalls > stallsBefore {
+										when = "stalled on this file just now (it sent no content)"
+									}
 									fencedBounce = fmt.Sprintf(
-										"The fenced-content channel stalled earlier in this run and is now off for the rest of the session — a fenced sub-call would only stall again. Re-issue write_file for %s with the COMPLETE file inline in the content field (write any inner double-quote as \\\"), or make a targeted change with edit_file or structural_edit.",
-										wfInput.Path)
+										"The fenced-content channel %s and is now off for the rest of the session — a fenced sub-call would only stall again. Re-issue write_file for %s with the COMPLETE file inline in the content field (write any inner double-quote as \\\"), or make a targeted change with edit_file or structural_edit.",
+										when, wfInput.Path)
 								}
 								st.bounceToolCall(ctx, "write_file", fencedBounce)
 								// A refusal here is a failed call like any
@@ -2834,6 +2919,12 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				}
 			}
 
+			// Repairs in progress: this call opens, extends or closes one on
+			// its own verdict, and the result the model reads names every
+			// file still open (repair.go).
+			st.observeRepair(ctx, turn, parsed.Name, parsed.Args, result)
+			result.OpenRepair = st.repairNote()
+
 			// Plan-adherence accounting. Records whether this tool
 			// call satisfied an unsatisfied step on ctx.Plan (if any),
 			// updates the off-streak counter, and asks us to revise
@@ -2934,7 +3025,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				if consecutiveErrors >= 3 {
 					samePath := stuckOnOnePath(ctx.RecentFailurePaths)
 					if !samePath {
-						log.Printf("[agent] path-aware breaker: %d consecutive failures across different paths (%v) — continuing, not a stuck loop", consecutiveErrors, ctx.RecentFailurePaths)
+						log.Printf("[agent] path-aware breaker: %d consecutive failures across different paths (%v) — continuing, not a stuck loop", consecutiveErrors, logPaths(ctx.RecentFailurePaths))
 						// Reset consecutiveErrors so the multi-file grind
 						// can keep going. The recent-paths list stays as
 						// a rolling window so if subsequent fails DO
@@ -3136,7 +3227,7 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 						"turn":   turn,
 						"detail": note,
 					})
-					log.Printf("[agent] asset lint: %s", truncateStr(note, 160))
+					log.Printf("[agent] asset lint: %s", logPath(truncateStr(note, 160)))
 				}
 			}
 
@@ -3195,26 +3286,10 @@ func runAgentLoop(ctx *AgentContext, userMessage string) error {
 				}
 			}
 
-			// Exploration budget: after 4 consecutive read-only calls,
-			// inject nudge. After 5, escalate the nudge. The read above
-			// already executed and its result is in context — the nudge
-			// steers the NEXT turn toward a write.
-			// FUTURE (L6 reliability): Compact models can over-explore when adding
-			// features to existing projects (~67% pass rate). Better prompting,
-			// larger model, or V3-guided exploration would improve this.
-			if consecutiveReads == 4 {
-				ctx.Messages = append(ctx.Messages, AgentMessage{
-					Role:    "user",
-					Content: "You have full project context in the system prompt. Do not read more files. Emit a write_file or edit_file tool call now.",
-				})
-				log.Printf("[agent] exploration budget: warning at turn %d", turn)
-			} else if consecutiveReads >= 5 {
-				ctx.Messages = append(ctx.Messages, AgentMessage{
-					Role:    "user",
-					Content: "You already have this information in context — reading more files will not help. Write your changes now. Use write_file or edit_file.",
-				})
-				consecutiveReads = 2 // Keep at warning level, don't reset
-				log.Printf("[agent] exploration budget: escalated nudge at turn %d", turn)
+			// Exploration budget: after a run of read-only calls, steer the next
+			// turn toward a write, or toward the answer (explorationNudge).
+			if note := explorationNudge(&consecutiveReads, turn, !answerOnlyRequest(ctx)); note != "" {
+				ctx.Messages = append(ctx.Messages, AgentMessage{Role: "user", Content: note})
 			}
 
 		default:
@@ -3960,6 +4035,8 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 	// Stale from the previous turn otherwise, which would blame a clean
 	// parse failure on a cut that happened earlier.
 	ctx.LastStreamCut = ""
+	ctx.LastOldStrCut = nil
+	ctx.LastFencedStream = fencedStreamStats{}
 	wireMessages := toWireMessages(messages)
 	wireMessages = appendLastReadRestatementFor(ctx, wireMessages, restateOnly)
 
@@ -4122,6 +4199,11 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 
 	resp, err := llmStreamClient.Do(httpReq)
 	if err != nil {
+		// No response at all before the first-content watchdog fired: the
+		// fenced_fetch event says so (#254).
+		if fencedSubCall && reqCtx.Err() != nil && (ctx.Ctx == nil || ctx.Ctx.Err() == nil) {
+			ctx.LastFencedStream = fencedStreamStats{Cut: "first_content"}
+		}
 		return "", 0, fmt.Errorf("LLM request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -4150,7 +4232,11 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 		contentLoopCut bool
 		noFenceCut     bool
 		lastLoopCheck  int
+		oldStrCut      bool
 	)
+	// An edit_file old_str is checked against its file while it streams
+	// (old_str_watch.go). Not in a fenced sub-call, which carries a body.
+	oldStrW := newOldStrWatch(ctx)
 
 	// Per-turn reasoning budget. A reasoning-heavy model can spiral for
 	// tens of thousands of tokens inside ONE generation (observed: a
@@ -4181,10 +4267,19 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 	// Recording what actually came back over the wire is what distinguishes
 	// "nothing was sent" from "something was sent and not parsed".
 	rawLines, firstLine := 0, ""
+	var firstFrame time.Duration
+	watchdogCut := ""
 	if fencedSubCall {
 		log.Printf("[agent] fenced sub-call response: status=%s content-type=%q transfer-encoding=%v content-length=%d",
 			resp.Status, resp.Header.Get("Content-Type"),
 			resp.TransferEncoding, resp.ContentLength)
+		// What the wire showed, for the caller's fenced_fetch event (#254).
+		defer func() {
+			ctx.LastFencedStream = fencedStreamStats{
+				FirstFrame: firstFrame, WireLines: rawLines, FirstLine: truncateStr(firstLine, 160),
+				ReasoningChars: reasoningBuf.Len(), ContentChars: contentBuf.Len(), Cut: watchdogCut,
+			}
+		}()
 	}
 
 	for scanner.Scan() {
@@ -4193,6 +4288,7 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 			rawLines++
 			if firstLine == "" && strings.TrimSpace(line) != "" {
 				firstLine = line
+				firstFrame = time.Since(sentAt)
 				// The stream is open and generating; content is due now.
 				armStalled()
 				log.Printf("[agent] fenced sub-call first wire line after %s: %s",
@@ -4277,8 +4373,8 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 			// is X. Wait, I can't see the output. I'll just say X. Wait, I
 			// can't..." repeating) — the reasoning budget doesn't catch it
 			// (that's content, not reasoning_content), so it ran to max_tokens.
-			// Detect a verbatim repeating tail and cut. Checked periodically
-			// to keep it O(n) overall.
+			// Detect a repeating tail and cut (streamLooping). Checked
+			// periodically to keep it O(n) overall.
 			// Raw-emission sub-call: we asked for exactly one fenced block
 			// and nothing else, so a reply with no fence opener after a few
 			// hundred characters is prose that will run to max_tokens. At
@@ -4292,21 +4388,11 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 				!strings.Contains(contentBuf.String(), "```") {
 				noFenceCut = true
 			}
-			if !contentLoopCut && contentBuf.Len() > 600 && contentBuf.Len()-lastLoopCheck > 200 {
+			if !contentLoopCut && !oldStrCut && contentBuf.Len() > 600 && contentBuf.Len()-lastLoopCheck > 200 {
 				lastLoopCheck = contentBuf.Len()
-				buffered := contentBuf.String()
-				threshold := 3
-				if strings.Contains(buffered, `"tool_call"`) || strings.Contains(buffered, "```") {
-					// Code is legitimately self-similar; only spiral-grade
-					// repetition is degeneration there. Covers both channels
-					// code streams through: tool_call JSON args, and the
-					// fenced block of the @fenced sub-call — without the
-					// fence case the prose threshold would re-cut healthy
-					// code in the channel built to avoid exactly that.
-					threshold = toolCallLoopThreshold
-				}
-				if loopingTailCount(buffered) >= threshold {
-					contentLoopCut = true
+				contentLoopCut = streamLooping(contentBuf.String())
+				if !contentLoopCut && !fencedSubCall {
+					oldStrCut = oldStrW.runaway(contentBuf.String())
 				}
 			}
 		}
@@ -4334,6 +4420,17 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 			ctx.LastStreamCut = "content_loop"
 			break
 		}
+		if oldStrCut {
+			log.Printf("[agent] edit_file old_str on %s stopped matching the file after %d line(s) and ran on (%d bytes) — cutting the stream",
+				logPath(oldStrW.Path), oldStrW.MatchedLines, oldStrW.Chars)
+			ctx.Stream("old_str_cut", map[string]interface{}{
+				"path": oldStrW.Path, "chars": contentBuf.Len(),
+				"old_str_chars": oldStrW.Chars, "matched_lines": oldStrW.MatchedLines,
+			})
+			ctx.LastStreamCut = "old_str_unmatched"
+			ctx.LastOldStrCut = oldStrW
+			break
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		// Our fenced watchdog cancels the request when no CONTENT token
@@ -4347,6 +4444,18 @@ func callLLMOnceRestating(ctx *AgentContext, messages []AgentMessage, temperatur
 		// on a large context were cut at the watchdog with the file already
 		// in reasoning_content, and the run died with only the first file.
 		if fencedSubCall && (ctx.Ctx == nil || ctx.Ctx.Err() == nil) {
+			// Which watchdog fired follows from what had arrived: none arms
+			// only once a frame has come, and content re-arms the idle one.
+			if reqCtx.Err() != nil {
+				switch {
+				case firstLine == "":
+					watchdogCut = "first_content"
+				case contentBuf.Len() == 0:
+					watchdogCut = "stalled"
+				default:
+					watchdogCut = "idle"
+				}
+			}
 			log.Printf("[agent] fenced sub-call stream cut (%v) after %s; wire lines=%d first=%q; reasoning_content held %d chars, content %d",
 				err, time.Since(sentAt).Round(time.Millisecond), rawLines,
 				truncateStr(firstLine, 120), reasoningBuf.Len(), contentBuf.Len())
@@ -4843,6 +4952,13 @@ func shadowCompareSets(contract, legacy []string, failed bool) string {
 	}
 }
 
+// answerOnlyRequest reports a request whose deliverable is an answer: the
+// client declared a question, or the user forbade any change. Steers read it;
+// the exit gates keep deciding the action demand (decideActionDemand).
+func answerOnlyRequest(ctx *AgentContext) bool {
+	return mutationForbidden(ctx) || (ctx.TaskContract != nil && ctx.TaskContract.TaskMode == TaskModeQuestion)
+}
+
 // observeActionDemand records one live action-demand decision and returns it
 // unchanged. The observer cannot alter the answer: it receives a decision that
 // has already been made and hands the same value back.
@@ -5177,11 +5293,10 @@ func isLoopingTail(s string) bool {
 // stump landed, the model patched the cut line instead of rewriting, and
 // the patch drifted (a comma in the print, spaces lost from a join).
 func loopingTailCount(s string) int {
-	const probe = 48
-	if len(s) < probe*3 {
+	if len(s) < loopProbe*3 {
 		return 0
 	}
-	tail := s[len(s)-probe:]
+	tail := s[len(s)-loopProbe:]
 	if strings.TrimSpace(tail) == "" {
 		return 0
 	}
@@ -5193,6 +5308,65 @@ func loopingTailCount(s string) int {
 // of repeats — so demanding 10 keeps the guard while making 3-4 branch-
 // shaped repeats of healthy code invisible to it.
 const toolCallLoopThreshold = 10
+
+// loopProbe is the length of the tail a loop check looks for earlier in the
+// stream.
+const loopProbe = 48
+
+// streamLooping is the content-loop decision for what a stream has produced
+// so far.
+func streamLooping(buffered string) bool {
+	threshold := 3
+	if strings.Contains(buffered, `"tool_call"`) || strings.Contains(buffered, "```") {
+		// Code is legitimately self-similar; only spiral-grade
+		// repetition is degeneration there. Covers both channels
+		// code streams through: tool_call JSON args, and the
+		// fenced block of the @fenced sub-call — without the
+		// fence case the prose threshold would re-cut healthy
+		// code in the channel built to avoid exactly that.
+		threshold = toolCallLoopThreshold
+	}
+	return loopingTailCount(buffered) >= threshold || countedLoop(buffered)
+}
+
+// countedLoopThreshold is the repeat count, with numbers masked, at which a
+// prose reply counts as a loop.
+const countedLoopThreshold = 5
+
+// proseReplyRe matches the start of a text or done reply.
+var proseReplyRe = regexp.MustCompile(`^\s*\{\s*"type"\s*:\s*"(text|done)"`)
+
+// digitRunRe matches one run of digits.
+var digitRunRe = regexp.MustCompile(`[0-9]+`)
+
+// countedLoop reports a prose reply that loops while it counts. Each repeat
+// carries a new number, so no tail repeats verbatim and loopingTailCount never
+// sees it: "29. I'll check planning.py's end. 30. I'll check planning.py's
+// end. ..." ran 328 s to the token cap in the fc8321d smoke run
+// (bugfind_tiebreak rep 1). With each run of digits masked, the repeats are
+// the same text.
+//
+// Only a text or done reply with no code block in it. A file body can count
+// legitimately (CSV rows, a numbered test table, a migration list), and it
+// streams in a tool call, a fenced sub-call, or a malformed call whose
+// "type" names the tool, none of which starts as a prose reply. The probe
+// must also hold words, so a numeric table in an answer is not a loop.
+func countedLoop(s string) bool {
+	if !proseReplyRe.MatchString(s) || strings.Contains(s, "```") {
+		return false
+	}
+	masked := digitRunRe.ReplaceAllString(s, "#")
+	if loopingTailCount(masked) < countedLoopThreshold {
+		return false
+	}
+	letters := 0
+	for _, b := range []byte(masked[len(masked)-loopProbe:]) {
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
+			letters++
+		}
+	}
+	return letters >= 16
+}
 
 // agentMaxTokens is the per-turn generation ceiling (ATLAS_MAX_TOKENS,
 // default 8192). Shared by the LLM request and conversationTokenBudget so the
@@ -5705,6 +5879,12 @@ func classifyParseFailure(raw, streamCut string) (category, feedback string) {
 			"file, and input or fixture data should be read at runtime by the code you " +
 			"write, never retyped into a tool call. Write the CODE that processes the " +
 			"data, not the data."
+	case "old_str_unmatched":
+		return "old_str_cut", "Your edit_file call was stopped while old_str was still arriving: " +
+			"it had stopped matching any text in the file and kept going. Nothing was executed " +
+			"and the file is unchanged. old_str must be text copied from the file; one short " +
+			"line that appears once in it is enough to place an edit, or use replace_lines " +
+			"with the line numbers read_file showed."
 	case "reasoning_budget":
 		return "reasoning_cut", "Your response was cut off: it spent the whole per-turn " +
 			"budget on reasoning without emitting a tool call. Skip the deliberation and " +
@@ -5784,6 +5964,10 @@ func classifyParseFailure(raw, streamCut string) (category, feedback string) {
 // Nothing in the cut call is executed either way.
 func parseFailureFeedback(ctx *AgentContext, raw, streamCut string) (string, string) {
 	category, feedback := classifyParseFailure(raw, streamCut)
+	if category == "old_str_cut" && ctx != nil && ctx.LastOldStrCut != nil && ctx.LastOldStrCut.Cut {
+		// The watch knows the file and the line where old_str left it.
+		return category, oldStrCutFeedback(ctx.LastOldStrCut)
+	}
 	if category != "loop_cut" && category != "truncated_tool" {
 		return category, feedback
 	}
@@ -5893,6 +6077,19 @@ const (
 	// silent after opening.
 	defaultFencedStalledSec = 25
 )
+
+// fencedStreamStats is what the wire showed during one fenced sub-call.
+type fencedStreamStats struct {
+	FirstFrame     time.Duration // since the request; 0 when no frame came
+	WireLines      int
+	FirstLine      string
+	ReasoningChars int
+	ContentChars   int
+	// Cut names the watchdog that ended the stream: first_content (no
+	// frame at all), stalled (frames, but no content), or idle (content,
+	// then none). Empty when no watchdog cut it.
+	Cut string
+}
 
 func fencedFirstContentTimeout() time.Duration {
 	return envDurationSec("ATLAS_FENCED_FIRST_CONTENT_SEC", defaultFencedFirstContentSec)
@@ -6073,6 +6270,11 @@ func fetchFencedContent(ctx *AgentContext, rawCall, path string) (string, error)
 		ctx.TotalTokens += tokens
 		ctx.FencedCalls++
 		ctx.FencedTokens += tokens
+		// Under the fence grammar a code file may end on three backticks
+		// (fenceBlockGrammar); that line is the closer the grammar accepted.
+		if isFenceBlockGrammar(grammar) && fenceShortCloserAllowed(tag) {
+			reply = closeShortFence(reply)
+		}
 		// The same framing decision the inline path makes, so a reply the
 		// parent would refuse inline cannot be accepted here instead.
 		framing, content := classifyFencedPayload(reply)
@@ -6111,6 +6313,16 @@ func fetchFencedContent(ctx *AgentContext, rawCall, path string) (string, error)
 		// the session and skipped that retry.
 		cutWithContent := err != nil && strings.TrimSpace(reply) != "" &&
 			(ctx.Ctx == nil || ctx.Ctx.Err() == nil)
+		outcome := "unusable"
+		switch {
+		case err != nil && !cutWithContent && ctx.Ctx != nil && ctx.Ctx.Err() != nil:
+			outcome = "cancelled"
+		case err != nil && !cutWithContent:
+			outcome = "stalled"
+		case got:
+			outcome = "used"
+		}
+		emitFencedFetch(ctx, path, attempt, grammar, elapsed, tokens, outcome)
 		if err != nil && !cutWithContent {
 			// Every way this attempt can end WITHOUT a fenced block charges
 			// the session: watchdog cancellation, transport error, HTTP
@@ -6167,6 +6379,35 @@ func fetchFencedContent(ctx *AgentContext, rawCall, path string) (string, error)
 	return "", fmt.Errorf("no fenced block after %d attempt(s) for %s this session; "+
 		"send the file inline or edit it instead",
 		ctx.FencedFailures[fencedKey(ctx, path)], path)
+}
+
+// emitFencedFetch records one fenced attempt (#254): what the wire showed
+// and what became of it. The outcome is the branch the fetch loop takes:
+// used, unusable (retried while attempts remain), stalled (charged against
+// the session's stall limit), or cancelled.
+func emitFencedFetch(ctx *AgentContext, path string, attempt int, grammar string,
+	elapsed time.Duration, tokens int, outcome string) {
+	fs := ctx.LastFencedStream
+	g := "raw"
+	if isFenceBlockGrammar(grammar) {
+		g = "fence"
+	}
+	ev := map[string]interface{}{
+		"path": path, "attempt": attempt + 1, "grammar": g, "outcome": outcome,
+		"elapsed_ms": elapsed.Milliseconds(), "tokens": tokens,
+		"first_frame_ms": fs.FirstFrame.Milliseconds(), "wire_lines": fs.WireLines,
+		"content_chars": fs.ContentChars, "reasoning_chars": fs.ReasoningChars,
+	}
+	if fs.Cut != "" {
+		ev["cut"] = fs.Cut
+	}
+	if ctx.LastStreamCut != "" {
+		ev["stream_cut"] = ctx.LastStreamCut
+	}
+	if fs.ContentChars == 0 && fs.FirstLine != "" {
+		ev["first_line"] = fs.FirstLine
+	}
+	ctx.Stream("fenced_fetch", ev)
 }
 
 func extractModelResponse(raw string) (ModelResponse, error) {
@@ -7515,6 +7756,16 @@ func emitTerminal(ctx *AgentContext, st *runState, status TerminalStatus, reason
 		// deliver the thing it was bounced to write. This is the emission
 		// itself, and it happens once.
 		retireAuthorizationGrants(ctx, grantTerminal)
+		// No run that leaves a file it wrote unparseable is reported
+		// completed, whichever path reached here (repair.go).
+		if st != nil {
+			st.refreshRepairs(ctx, st.turn, "")
+			if open := st.openRepairs(); len(open) > 0 && status.Completed() {
+				log.Printf("[agent] terminal %s/%s with %s unparseable — reporting repair_unfinished",
+					status, reason, repairNames(open))
+				status, reason = TerminalIncomplete, "repair_unfinished"
+			}
+		}
 		ctx.TerminalStatus = status
 		ctx.TerminalReason = reason
 		ctx.TerminalUnresolved = unresolvedGateNames(st)
@@ -7544,6 +7795,17 @@ func emitTerminal(ctx *AgentContext, st *runState, status TerminalStatus, reason
 		// tell a clean completion from one with caveats.
 		if ctx.TerminalUnresolved != "" {
 			done["unresolved"] = ctx.TerminalUnresolved
+		}
+		// Additive: the files still unparseable at the end, whatever the
+		// reason, so a consumer can find every hand-off without reading
+		// the summary.
+		if open := st.openRepairs(); len(open) > 0 {
+			names := make([]string, 0, len(open))
+			for _, r := range open {
+				names = append(names, r.Rel)
+			}
+			done["repair_open"] = strings.Join(names, ",")
+			st.emitRepairHandoff(ctx, reason)
 		}
 		ctx.Stream("done", done)
 	})
@@ -8099,6 +8361,16 @@ func honestTerminalSummary(ctx *AgentContext, st *runState, status TerminalStatu
 			status, reason, claim)
 		out = ""
 	}
+	// A file still unparseable is handed to the user with what was tried
+	// (repairHandoff). For repair_unfinished that is the whole account;
+	// after any other ending it follows the ending's own summary.
+	if handoff := repairHandoff(st, reason); handoff != "" {
+		if reason == "repair_unfinished" || out == "" {
+			out = handoff
+		} else {
+			out += "\n\n" + handoff
+		}
+	}
 	if out == "" {
 		out = serverTerminalFallback(ctx, st, status, reason)
 	}
@@ -8474,7 +8746,12 @@ func steerRecovery(ctx *AgentContext, st *runState, relPath, resolvedPath string
 			}
 		}
 		ctx.RecordFileRead(resolvedPath, shown)
-		ctx.RecordBodySeen(resolvedPath)
+		if truncated {
+			// Only the head was shown; the file runs past it.
+			ctx.RecordBodyRead(resolvedPath, 1, fencedRecoveryMaxLines, fencedRecoveryMaxLines+1)
+		} else {
+			ctx.RecordBodySeen(resolvedPath)
+		}
 		log.Printf("[agent] steering recovery for %s: showed the file (truncated=%v)", relPath, truncated)
 	} else {
 		fmt.Fprintf(&sb, "You have already read %s, and write_file will keep refusing it — "+
@@ -9089,6 +9366,14 @@ func finalizeCompletion(ctx *AgentContext, st *runState, userMessage, completedR
 	// Settle what can be settled FIRST, so the evidence the rest of this
 	// function reads is about a workspace nothing is still writing to.
 	liveJobs := settleBackgroundHazard(ctx)
+
+	// A file this session left unparseable outranks every other reason: it
+	// is the most specific thing the user needs to know, and the final
+	// message says what was tried on it (repairHandoff).
+	st.refreshRepairs(ctx, st.turn, "")
+	if len(st.openRepairs()) > 0 {
+		return TerminalIncomplete, "repair_unfinished"
+	}
 
 	ok, why := terminalCompletionAllowed(ctx, st.expectedOutputs)
 	if !ok {

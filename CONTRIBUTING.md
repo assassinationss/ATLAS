@@ -167,7 +167,7 @@ approves the run. CI on a fork never gets the repository's secrets.
   - an approval from a code owner ([CODEOWNERS](.github/CODEOWNERS))
   - all required checks green
   - every conversation resolved
-  - the branch up to date with `dev` (use **Update branch**)
+  - no conflict with `dev` (a maintainer may ask you to click **Update branch**)
 - New commits dismiss earlier approvals, so the last push gets reviewed.
 - Maintainers merge with **squash** (your title becomes the commit) or
   **rebase**. History on `dev` stays linear.
@@ -184,10 +184,11 @@ stated as untested).
 | `staging` | Release candidate (`vX.Y.Z-rc.N`) | When a maintainer promotes `dev`. It stays at least 3 days. |
 | `main` | Released (`vX.Y.Z`, `:latest`) | When the candidate passes and the release owner approves |
 
-Your issue: `Closes #N` closes an issue only for pull requests into `main`,
-and yours goes into `dev`. After the merge, a maintainer sets the issue's
-Status to Done, which closes it. Its milestone shows the release that ships
-your change.
+Your issue: GitHub's `Closes #N` acts only on `main`, and your pull request
+goes into `dev`. So the bot closes the issue for you within a few hours of
+the merge, and the board marks it Done. Its milestone shows the release that
+ships your change. If the issue should stay open after your change lands
+(it still needs a check after a deploy), write `Refs #N` instead.
 
 Minor releases ship when `dev` is ready; there's no fixed calendar. Fixes
 and security releases can ship any time. [RELEASE.md](docs/RELEASE.md) has
@@ -217,6 +218,9 @@ minimum time, a nomination, and hard technical limits. See the
 [trust ladder](GOVERNANCE.md#trust-ladder).
 
 ## Code style
+
+How code should read (size, structure, abstractions, comments) is in
+[CODE_STYLE.md](docs/CODE_STYLE.md). The rules per language:
 
 **Python.** PEP 8, type hints on function signatures, docstrings on public
 functions, lines up to 100 characters. `ruff` runs in the gate.

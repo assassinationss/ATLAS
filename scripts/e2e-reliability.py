@@ -1084,6 +1084,10 @@ class Session:
     task_passed: bool = False
     task_detail: str = ""
     quality: dict = field(default_factory=dict)
+    # Containers that restarted, were OOM-killed or went away while the
+    # session ran (stack_changes). A measured outcome over an unstable stack
+    # says so.
+    stack_changes: list[str] = field(default_factory=list)
 
     def of_type(self, t: str) -> list[dict]:
         return [e for e in self.events if e.get("type") == t]
@@ -1351,12 +1355,38 @@ def _recovered_after(s: Session, idx: int) -> bool:
     return worked and finished
 
 
+def model_output_guards(s: Session) -> list[str]:
+    """The categories of the proxy's model-output guards in a session.
+
+    A guard is the proxy catching the model's own malformed output and telling
+    it: a parse failure, content swallowed by an unescaped quote, or content
+    whose intended bytes were ambiguous. Every such error event carries a
+    "category". The plumbing worked, so these are counted for the summary and
+    never as a harness defect (h6_service_fault).
+    """
+    return [str((ev.get("data") or {}).get("category"))
+            for ev in s.of_type("error") if (ev.get("data") or {}).get("category")]
+
+
+def _ended_on_work_deadline(s: Session) -> bool:
+    for ev in reversed(s.of_type("done")):
+        d = ev.get("data") or {}
+        return d.get("reason") == "work_deadline" or d.get("status") == "timed_out"
+    return False
+
+
 def h6_service_fault(s: Session) -> list[str]:
     out = []
     for idx, ev in enumerate(s.events):
         if ev.get("type") != "error":
             continue
         d = ev.get("data") or {}
+        # A model-output guard is not a service fault, recovered or not: see
+        # model_output_guards. Smoke run 2026-09-27 (smallrung_toml): the
+        # swallowed_content guard caught a tool call cut by an unescaped quote,
+        # told the model, and the run still showed "1 harness defect" for it.
+        if d.get("category"):
+            continue
         # The proxy's error events carry "error" (see the TUI's own case);
         # "message" is what this harness uses for a stream-level failure it
         # synthesises. Reading only one of them reported every real error as
@@ -1367,6 +1397,12 @@ def h6_service_fault(s: Session) -> list[str]:
         # to the proxy a second time — h1_protocol already reports it as the
         # timeout it is.
         if "harness cap:" in str(detail):
+            continue
+        # The session's own work deadline cut an LLM stream in flight. The
+        # terminal status already reports that (timed_out, work_deadline); no
+        # dependency failed. Smoke run 2026-09-28 (multifile_cli rep 2).
+        if ("context deadline exceeded" in str(detail)
+                or "context canceled" in str(detail)) and _ended_on_work_deadline(s):
             continue
         # A parse failure the session recovered from is the proxy doing its
         # job, not a service outage. Measured 2026-08-03 on flask_pause rep2:
@@ -1705,6 +1741,170 @@ def preflight(sandbox: str, subdir: str) -> list[str]:
     return problems
 
 
+def container_states(project: str, run=subprocess.run) -> dict | None:
+    """Each container of the compose project, by name: its restart count,
+    whether it was OOM-killed, and when it last started.
+
+    None when docker cannot be asked (the runner may point at a stack it
+    cannot inspect). `run` is subprocess.run, injectable for tests."""
+    try:
+        ps = run(["docker", "ps", "-a", "--filter",
+                  f"label=com.docker.compose.project={project}", "--format", "{{.Names}}"],
+                 capture_output=True, text=True, timeout=30)
+        names = (ps.stdout or "").split()
+        if ps.returncode != 0 or not names:
+            return None
+        p = run(["docker", "inspect", "--format",
+                 "{{.Name}} {{.RestartCount}} {{.State.OOMKilled}} {{.State.StartedAt}}", *names],
+                capture_output=True, text=True, timeout=30)
+        if p.returncode != 0:
+            return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = {}
+    for line in (p.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) != 4 or not parts[1].isdigit():
+            continue
+        out[parts[0].lstrip("/")] = {"restarts": int(parts[1]), "oom": parts[2] == "true",
+                                     "started": parts[3]}
+    return out or None
+
+
+def stack_changes(before: dict | None, after: dict | None) -> list[str]:
+    """What happened to the stack's containers between two snapshots.
+
+    A restart by the restart policy raises the restart count; a manual
+    restart or a recreate only moves the start time, so both are read."""
+    if before is None and after is None:
+        return []
+    if before is None or after is None:
+        return ["container state could not be read at the "
+                + ("start" if before is None else "end") + " of the session"]
+    out = []
+    for name in sorted(before.keys() | after.keys()):
+        b, a = before.get(name), after.get(name)
+        if a is None:
+            out.append(f"{name} is gone")
+            continue
+        if b is None:
+            out.append(f"{name} appeared")
+            continue
+        if a["restarts"] > b["restarts"]:
+            n = a["restarts"] - b["restarts"]
+            out.append(f"{name} restarted {n} time{'s' if n > 1 else ''}")
+        elif a["started"] != b["started"]:
+            out.append(f"{name} was restarted or recreated")
+        if a["oom"] and not (b["oom"] and a["started"] == b["started"]):
+            out.append(f"{name} was OOM-killed")
+    return out
+
+
+# The five services a stack runs, as scripts/deploy-gated.sh names them.
+STACK_SERVICES = ("llama-server", "geometric-lens", "v3-service", "sandbox", "atlas-proxy")
+
+
+def running_images(project: str, run=subprocess.run) -> dict | None:
+    """The image id each running service of the compose project uses.
+
+    None when docker cannot be asked. `run` is subprocess.run, injectable for
+    tests."""
+    try:
+        ps = run(["docker", "ps", "--filter",
+                  f"label=com.docker.compose.project={project}", "--format", "{{.Names}}"],
+                 capture_output=True, text=True, timeout=30)
+        names = (ps.stdout or "").split()
+        if ps.returncode != 0 or not names:
+            return None
+        p = run(["docker", "inspect", "--format",
+                 '{{index .Config.Labels "com.docker.compose.service"}} {{.Image}}', *names],
+                capture_output=True, text=True, timeout=30)
+        if p.returncode != 0:
+            return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = {}
+    for line in (p.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            out[parts[0]] = parts[1]
+    return out or None
+
+
+def _same_commit(a: str, b: str) -> bool:
+    """Two commit ids name one commit when the shorter is a prefix of the
+    longer and at least 7 characters long."""
+    a, b = (a or "").strip(), (b or "").strip()
+    short = min(len(a), len(b))
+    return short >= 7 and a[:short] == b[:short]
+
+
+def deployed_identity(project: str, deploy_dir: Path, commit: str,
+                      run=subprocess.run) -> dict:
+    """The commit and the five images this run measures (#241).
+
+    A result is evidence only for the stack that produced it. The gated deploy
+    records the commit it deployed (DEPLOYED_SHA) and, in
+    deployed/running-<sha>.json, the image each of the five services runs for
+    it. llama-server is kept, not rebuilt, when inference/ did not change, so
+    an image's own build commit is not the test: the record is. The stack is
+    that commit's only when the stated commit is the deployed one and every
+    running service uses the image recorded for it.
+
+    Returns {"commit", "images", "verified", "mismatch", "problems"}. A
+    mismatch means a record exists and the stack differs from it: a run is
+    refused. With no record there is nothing to check against (a stack this
+    script did not deploy): the run is unverified, and says so."""
+    out = {"commit": commit, "images": {}, "verified": False, "mismatch": False,
+           "problems": []}
+    try:
+        deployed = (deploy_dir / "DEPLOYED_SHA").read_text().strip()
+    except OSError:
+        out["problems"].append(f"no gated deploy record in {deploy_dir}: the stack is unverified")
+        live = running_images(project, run) if project else None
+        out["images"] = live or {}
+        return out
+    out["commit"] = deployed
+    if commit and not _same_commit(commit, deployed):
+        out["problems"].append(f"the checkout is at {commit}, but the stack was deployed from {deployed}")
+    try:
+        record = json.loads((deploy_dir / "deployed" / f"running-{deployed}.json").read_text())
+        recorded = {svc: (v or {}).get("image_id", "") for svc, v in (record.get("running") or {}).items()}
+    except (OSError, ValueError):
+        recorded = {}
+        out["problems"].append(f"no record of the images deployed for {deployed}")
+    live = running_images(project, run) if project else None
+    out["images"] = live or {}
+    if live is None:
+        out["problems"].append("docker could not be asked which images are running")
+    else:
+        for svc in STACK_SERVICES:
+            if svc not in live:
+                out["problems"].append(f"{svc} is not running")
+            elif recorded and live[svc] != recorded.get(svc):
+                out["problems"].append(
+                    f"{svc} runs {live[svc][:19]}, not the {recorded.get(svc, '?')[:19]} deployed for {deployed}")
+    out["mismatch"] = bool(out["problems"])
+    out["verified"] = not out["problems"]
+    return out
+
+
+def result_row(s: Session, evaluator, stack) -> dict:
+    """One session in the run's JSON result."""
+    return {
+        "task": s.task, "rep": s.rep, "task_passed": s.task_passed,
+        "task_detail": s.task_detail, "defects": s.defects,
+        "task_mode": task_contract(TASKS[s.task])["task_mode"] if s.task in TASKS else None,
+        "turns": len(s.of_type("turn_start")),
+        "tools": len(s.of_type("tool_call")), "wall_s": round(s.wall_s, 1),
+        "v3": s.v3,
+        "quality": s.quality,
+        "stack_changes": s.stack_changes,
+        "evaluator": evaluator,
+        "stack": stack,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1718,6 +1918,14 @@ def main() -> int:
                          "host path of this same subdirectory")
     ap.add_argument("--sandbox-container", default="atlas-sandbox-1",
                     help="'' to skip the background-leak check")
+    ap.add_argument("--compose-project", default="atlas",
+                    help="compose project whose containers are checked for restarts "
+                         "and OOM kills around each session; '' to skip")
+    ap.add_argument("--deploy-dir", default=os.environ.get(
+                        "ATLAS_DEPLOY_DIR", str(Path.home() / "atlas-ralph")),
+                    help="the gated deploy's record directory (scripts/deploy-gated.sh)")
+    ap.add_argument("--commit", default="",
+                    help="the commit this run claims to measure; default: this checkout's HEAD")
     ap.add_argument("--tasks", default=",".join(TASKS))
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--timeout", type=int, default=900)
@@ -1747,6 +1955,24 @@ def main() -> int:
     # What the proxy says it runs, read once before any session and kept
     # with every result.
     STACK = stack_identity(args.url)
+    # And which commit and images it is (#241). A stack that differs from its
+    # gated deploy record is not measured at all.
+    commit = args.commit
+    if not commit:
+        head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True)
+        commit = head.stdout.strip() if head.returncode == 0 else ""
+    identity = deployed_identity(args.compose_project, Path(args.deploy_dir), commit)
+    if identity["mismatch"]:
+        for line in identity["problems"]:
+            print(f"error: {line}", file=sys.stderr)
+        print("error: refusing to measure a stack that is not the one deployed "
+              "for this commit", file=sys.stderr)
+        return 2
+    for line in identity["problems"]:
+        print(f"warning: {line}", file=sys.stderr)
+    STACK.update(commit=identity["commit"], images=identity["images"],
+                 identity_verified=identity["verified"])
 
     global _SANDBOX_CONTAINER, _SANDBOX_WORKDIR
     _SANDBOX_CONTAINER = args.sandbox_container or ""
@@ -1777,8 +2003,11 @@ def main() -> int:
                 subprocess.run(["docker", "exec", args.sandbox_container,
                                 "pkill", "-f", "python app"],
                                capture_output=True, timeout=30)
+            before = container_states(args.compose_project) if args.compose_project else None
             s = run_session(task, rep, args.url, ws,
                             args.subdir, args.timeout)
+            if args.compose_project:
+                s.stack_changes = stack_changes(before, container_states(args.compose_project))
             s.defects += h1_protocol(s, known)
             s.defects += h2_false_rejection(s)
             s.defects += h3_dead_end_steering(s)
@@ -1801,23 +2030,15 @@ def main() -> int:
                   flush=True)
             for d in s.defects:
                 print(f"      ! {d}", flush=True)
+            for c in s.stack_changes:
+                print(f"      ! stack: {c}", flush=True)
 
     report(sessions, known)
     EVAL_ID = evaluator_identity()
     print(f"evaluator: {EVAL_ID}")
     print(f"stack: {STACK}")
     if args.json_out:
-        Path(args.json_out).write_text(json.dumps([{
-            "task": s.task, "rep": s.rep, "task_passed": s.task_passed,
-            "task_detail": s.task_detail, "defects": s.defects,
-            "task_mode": task_contract(TASKS[s.task])["task_mode"] if s.task in TASKS else None,
-            "turns": len(s.of_type("turn_start")),
-            "tools": len(s.of_type("tool_call")), "wall_s": round(s.wall_s, 1),
-            "v3": s.v3,
-            "quality": s.quality,
-            "evaluator": EVAL_ID,
-            "stack": STACK,
-        } for s in sessions], indent=2))
+        Path(args.json_out).write_text(json.dumps([result_row(s, EVAL_ID, STACK) for s in sessions], indent=2))
         print(f"\nwrote {args.json_out}")
     return 0 if all(not s.defects for s in sessions) else 1
 
@@ -1878,6 +2099,23 @@ def report(sessions: list[Session], known: set[str]) -> None:
             print(f"  {cnt:3d}  {cls}")
     else:
         print("\nNo harness defects detected.")
+    guards = [model_output_guards(s) for s in sessions]
+    if any(guards):
+        kinds: dict[str, int] = {}
+        for g in guards:
+            for k in g:
+                kinds[k] = kinds.get(k, 0) + 1
+        print(f"Model-output guards (the proxy caught malformed model output; "
+              f"not harness defects): {sum(len(g) for g in guards)} in "
+              f"{sum(1 for g in guards if g)} session(s): "
+              + ", ".join(f"{k} {n}" for k, n in sorted(kinds.items())))
+
+    unstable = [s for s in sessions if s.stack_changes]
+    if unstable:
+        print(f"Stack not stable in {len(unstable)}/{total} session(s): the outcomes "
+              f"of these ran over a restart, an OOM kill or a missing container:")
+        for s in unstable:
+            print(f"  {s.task} rep {s.rep}: {'; '.join(s.stack_changes)}")
 
     print("\nPer task:")
     for name in sorted({s.task for s in sessions}):

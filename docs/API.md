@@ -120,6 +120,7 @@ Every event has the shape `{"type":"<name>","data":{...}}`. Types in emission or
 | `reasoning_token` | One delta from a model's optional `reasoning_content` stream during SSE chat completion. These tokens are forwarded to the TUI for live display. Distinct from `llm_token` (which carries the JSON tool-call content destined for parse). | `text` (string — single delta of reasoning prose) |
 | `reasoning_budget_cut` | The `reasoning_content` stream exceeded the reasoning budget with no content emitted — the proxy cuts the stream and re-prompts. | `reasoning_chars` (int — reasoning chars accumulated when cut) |
 | `content_loop_cut` | The proxy detected a verbatim repeating tail in the content stream (the model restating itself in a loop) and cut the stream. | `chars` (int — content chars accumulated when cut) |
+| `old_str_cut` | An `edit_file` old_str had stopped matching its target file and kept arriving, so the proxy cut the stream: the call could not succeed. The model is told the file and the line where old_str left it. | `path` (string), `chars` (int — content chars when cut), `old_str_chars` (int), `matched_lines` (int — old_str lines that still matched) |
 | `v3_repair` | Phase 3 repair strategy (`phase3`, `pr_cot*`, `refinement*`, `fallback`, `fallback_all_vetoed`) | `stage`, `detail`, `strategy` (string: `pr_cot` / `refinement`), `failing` (int), `iterations` (int, on `refinement_pass`), `tokens` (int, on `_pass`) |
 | `v3_probe` | Probe phase events (`probe`, `probe_light`, `probe_error`, `probe_retry`, `probe_failed`, `probe_scored`, `probe_sandbox`, `probe_pass`) | `stage`, `detail` |
 | `v3_self_test` | Self-test generation/verify events (`self_test_gen`, `self_test_done`, `self_test_error`, `self_test_skip`, `self_test_verify`) | `stage`, `detail` |
@@ -464,6 +465,8 @@ data: {"code": "...", "passed": true, "phase_solved": "phase1", "candidates_test
 data: [DONE]
 ```
 
+`phase_solved` says how `code` was chosen: `probe`, `phase1`, `pr_cot`, `refinement` or `budget` after a check it passed; `consensus` by agreement alone; `incumbent` when the caller's own `baseline_code` held (`code` is then those exact bytes); `baseline` when nothing was chosen and the caller's bytes are sent back; `none` otherwise.
+
 Each progress event has the shape `{"stage": "<name>", "detail": "<human-readable>", "data": {...}}`. The `data` object carries structured fields specific to that stage (counts, indices, timings, strategy labels) — the proxy bridge fans these out into the dedicated `v3_*` events on `/v1/agent`. Older stages without `data` enrichment still emit `stage` + `detail` only and continue to flow through `v3_progress`.
 
 The proxy's `tools.go` bridge translates these into `v3_progress` / `v3_token` / `v3_llm_start` / `v3_llm_end` events on the `/v1/agent` stream — direct callers see the raw V3 stages.
@@ -476,9 +479,9 @@ The pipeline emits stages as it progresses. Not all stages appear in every run �
 | Phase | Stages |
 |-------|--------|
 | **Setup / classification** | `task_type` (interactive/batch classification of the request) |
-| **Probe (Phase 0)** | `probe`, `probe_light`, `probe_error`, `probe_retry`, `probe_failed`, `self_test_gen`, `self_test_done`, `self_test_error`, `self_test_skip` (interactive task — compile smoke-test instead), `self_test_verify`, `smoke_check`, `interactive_lint`, `probe_scored`, `probe_sandbox`, `probe_pass` |
+| **Probe (Phase 0)** | `probe`, `probe_light`, `probe_error`, `probe_retry`, `probe_failed`, `self_test_gen`, `self_test_done`, `self_test_error`, `self_test_skip` (interactive task — compile smoke-test instead), `self_test_verify`, `smoke_check`, `interactive_lint`, `probe_scored`, `probe_sandbox`, `probe_pass`, `incumbent` (the caller's `baseline_code` checked as a candidate), `incumbent_holds` (it passed and its record closes, so it is returned unchanged) |
 | **Generation (Phase 1)** | `phase1`, `phase2` (allocation), `phase2_allocated`, `plansearch`, `plansearch_done`, `plansearch_error`, `divsampling`, `divsampling_done`, `divsampling_error` |
-| **Testing / selection (Phase 2)** | `sandbox_test`, `sandbox_pass`, `sandbox_fail`, `sandbox_done`, `lens_per_step`, `lens_veto`, `structural_veto`, `call_graph_veto`, `selected` |
+| **Testing / selection (Phase 2)** | `sandbox_test`, `sandbox_pass`, `sandbox_fail`, `sandbox_done`, `role_check` (a candidate dropped a top-level name of the caller's file; it fails), `lens_per_step`, `lens_veto`, `structural_veto`, `call_graph_veto`, `retyping_dropped` (candidates that only re-typed the caller's file leave the pool), `selected` |
 | **Repair (Phase 3)** | `phase3`, `pr_cot`, `pr_cot_pass`, `pr_cot_failed`, `pr_cot_error`, `refinement`, `refinement_pass`, `refinement_failed`, `refinement_error`, `refinement_verify_failed`, `refinement_skip` (remaining `ATLAS_V3_TIMEOUT` budget cannot afford one iteration — straight to fallback), `call_chain_context`, `fallback`, `fallback_all_vetoed` (every candidate was vetoed — no code returned) |
 | **Verification** | `build_verify_unavailable` (build-command verification skipped — runner unreachable or command not allowed by policy) |
 | **LLM streaming** | `llm_start`, `token`, `llm_end` (one bracketed group per internal LLM call — planner, candidate generation, repair, etc.) |
@@ -1169,12 +1172,13 @@ curl http://localhost:8080/health
 ## Versioning and error codes
 
 `GET /version` returns the API version, the SSE protocol version, the
-full error-code set, and the tool-call grammar mode this proxy applies
-(`strict` or `loose`, from `ATLAS_GRAMMAR_MODE`), so a measurement can
+full error-code set, the tool-call grammar mode this proxy applies
+(`strict` or `loose`, from `ATLAS_GRAMMAR_MODE`), and the session limit in
+seconds (`ATLAS_AGENT_SESSION_TIMEOUT_SEC`, default 600), so a measurement can
 record the configuration it ran against:
 
 ```json
-{"api_version": "1.0.0", "protocol_version": 1, "error_codes": [...], "grammar_mode": "strict"}
+{"api_version": "1.0.0", "protocol_version": 1, "error_codes": [...], "grammar_mode": "strict", "session_timeout_s": 600}
 ```
 
 `api_version` follows semver (minor = additive, major = breaking).

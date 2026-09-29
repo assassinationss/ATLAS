@@ -444,6 +444,36 @@ def test_h6_still_reports_a_parse_failure_the_session_died_on(rel, tmp_path):
     assert any("parse model response" in d for d in rel.h6_service_fault(s))
 
 
+def test_h6_does_not_count_a_model_output_guard(rel, tmp_path):
+    """Smoke run 2026-09-27 (smallrung_toml): the only error event was the
+    swallowed_content guard, which caught a tool call cut by an unescaped
+    quote and told the model. The run still showed "1 harness defect". A
+    guard that worked is not a service fault, even when the session later
+    fails; it is counted for the summary instead."""
+    guard = {"type": "error", "data": {
+        "category": "swallowed_content",
+        "error": "tool call content was truncated by an unescaped quote"}}
+    s = _session(rel, [_call("read_file", path="x.py"), _ok(), guard,
+                       {"type": "done", "data": {"status": "incomplete",
+                                                 "reason": "text_instead_of_work"}}],
+                 tmp_path)
+    assert rel.h6_service_fault(s) == []
+    assert rel.model_output_guards(s) == ["swallowed_content"]
+
+
+def test_h6_does_not_charge_the_work_deadline_to_a_service(rel, tmp_path):
+    """Smoke run 2026-09-28 (multifile_cli rep 2): the session's own work
+    deadline cut an LLM stream; the terminal status already says timed_out."""
+    cut = {"type": "error",
+           "data": {"error": "read LLM stream: context deadline exceeded"}}
+    done = {"type": "done", "data": {"status": "timed_out", "reason": "work_deadline"}}
+    s = _session(rel, [_call("read_file", path="x.py"), _ok(), cut, done], tmp_path)
+    assert rel.h6_service_fault(s) == []
+    # The same cut in a session that did not end on its deadline still counts.
+    s = _session(rel, [cut], tmp_path, stream_ok=False)
+    assert any("context deadline exceeded" in d for d in rel.h6_service_fault(s))
+
+
 # --- V3 is always on -------------------------------------------------------
 #
 # The runners measure the shipped system. No request field turns V3 off: the
@@ -607,3 +637,178 @@ def test_stack_identity_records_what_the_proxy_reports(rel):
     # Unreachable: recorded as such, never a crash.
     down = rel.stack_identity("http://127.0.0.1:9")
     assert down["grammar_mode"] is None and set(down["errors"]) == {"version", "calibration"}
+
+
+# --- stack stability (#240) ---------------------------------------------------
+#
+# A restart or an OOM kill during a session changes its outcome, and the
+# result did not say so. The runner now snapshots each container of the
+# compose project before and after every session.
+
+class _Proc:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout, self.returncode = stdout, returncode
+
+
+def _fake_docker(states):
+    """A stand-in for subprocess.run: `docker ps` lists the containers, and
+    `docker inspect` reports each one's (restarts, oom_killed, started_at)."""
+    def run(argv, **kw):
+        if argv[:2] == ["docker", "ps"]:
+            return _Proc("\n".join(states) + "\n")
+        if argv[:2] == ["docker", "inspect"]:
+            return _Proc("".join(f"/{n} {r} {'true' if o else 'false'} {t}\n"
+                                 for n, (r, o, t) in states.items()))
+        raise AssertionError(f"unexpected command {argv}")
+    return run
+
+
+def _states(rel, **containers):
+    return rel.container_states("atlas", run=_fake_docker(containers))
+
+
+def test_a_restart_during_the_session_is_in_its_result(rel, tmp_path):
+    before = _states(rel, lens=(0, False, "T1"), proxy=(0, False, "T1"))
+    after = _states(rel, lens=(1, False, "T2"), proxy=(0, False, "T1"))
+    s = _session(rel, [], tmp_path)
+    s.stack_changes = rel.stack_changes(before, after)
+    assert s.stack_changes == ["lens restarted 1 time"]
+    assert rel.result_row(s, {}, {})["stack_changes"] == ["lens restarted 1 time"]
+
+
+def test_an_oom_kill_is_named(rel):
+    before = _states(rel, llama=(0, False, "T1"))
+    after = _states(rel, llama=(2, True, "T3"))
+    assert rel.stack_changes(before, after) == ["llama restarted 2 times", "llama was OOM-killed"]
+
+
+def test_a_manual_restart_or_recreate_is_named(rel):
+    # `docker restart` and a compose recreate leave the restart count alone.
+    before = _states(rel, sandbox=(0, False, "T1"))
+    after = _states(rel, sandbox=(0, False, "T2"))
+    assert rel.stack_changes(before, after) == ["sandbox was restarted or recreated"]
+
+
+def test_a_container_that_went_away_or_appeared_is_named(rel):
+    before = _states(rel, lens=(0, False, "T1"), v3=(0, False, "T1"))
+    after = _states(rel, lens=(0, False, "T1"), extra=(0, False, "T2"))
+    assert rel.stack_changes(before, after) == ["extra appeared", "v3 is gone"]
+
+
+def test_a_stable_stack_records_nothing(rel):
+    before = _states(rel, lens=(3, True, "T1"))
+    after = _states(rel, lens=(3, True, "T1"))
+    assert rel.stack_changes(before, after) == []
+
+
+def test_docker_that_cannot_be_asked_is_not_read_as_stable_mid_session(rel):
+    def broken(argv, **kw):
+        raise OSError("docker not found")
+    assert rel.container_states("atlas", run=broken) is None
+    # Unavailable throughout: nothing to compare, nothing claimed.
+    assert rel.stack_changes(None, None) == []
+    snap = _states(rel, lens=(0, False, "T1"))
+    assert rel.stack_changes(snap, None) == [
+        "container state could not be read at the end of the session"]
+
+
+# --- one commit, five images (#241) --------------------------------------------
+#
+# A result is evidence only for the stack that produced it. Before a run, the
+# runner checks the stated commit against the gated deploy's record and each
+# running service's image against the image recorded for that commit.
+
+_IMAGES = {"llama-server": "sha256:aaa", "geometric-lens": "sha256:bbb",
+           "v3-service": "sha256:ccc", "sandbox": "sha256:ddd", "atlas-proxy": "sha256:eee"}
+
+
+def _fake_images(images):
+    """`docker ps` lists one container per service; `docker inspect` reports
+    each one's compose service label and image id."""
+    def run(argv, **kw):
+        if argv[:2] == ["docker", "ps"]:
+            return _Proc("\n".join(f"atlas-{s}-1" for s in images) + "\n")
+        if argv[:2] == ["docker", "inspect"]:
+            return _Proc("".join(f"{s} {i}\n" for s, i in images.items()))
+        raise AssertionError(f"unexpected command {argv}")
+    return run
+
+
+def _deploy_record(tmp_path, sha="b0e6013", images=None):
+    d = tmp_path / "atlas-ralph"
+    (d / "deployed").mkdir(parents=True)
+    (d / "DEPLOYED_SHA").write_text(sha + "\n")
+    (d / "deployed" / f"running-{sha}.json").write_text(json.dumps(
+        {"sha": sha, "running": {s: {"image_id": i} for s, i in (images or _IMAGES).items()}}))
+    return d
+
+
+def test_a_single_commit_stack_is_verified_and_its_images_recorded(rel, tmp_path):
+    ident = rel.deployed_identity("atlas", _deploy_record(tmp_path), "b0e6013",
+                                  run=_fake_images(_IMAGES))
+    assert ident["verified"] and not ident["mismatch"], ident["problems"]
+    assert ident["commit"] == "b0e6013"
+    assert ident["images"] == _IMAGES
+
+
+def test_a_mixed_stack_is_refused(rel, tmp_path):
+    live = dict(_IMAGES, **{"v3-service": "sha256:999"})
+    ident = rel.deployed_identity("atlas", _deploy_record(tmp_path), "b0e6013",
+                                  run=_fake_images(live))
+    assert ident["mismatch"] and not ident["verified"]
+    assert any("v3-service runs sha256:999" in p for p in ident["problems"]), ident["problems"]
+
+
+def test_a_checkout_that_is_not_the_deployed_commit_is_refused(rel, tmp_path):
+    ident = rel.deployed_identity("atlas", _deploy_record(tmp_path), "47907c9",
+                                  run=_fake_images(_IMAGES))
+    assert ident["mismatch"]
+    assert any("deployed from b0e6013" in p for p in ident["problems"])
+    # The same commit, named at another length, is the same commit.
+    ok = rel.deployed_identity("atlas", _deploy_record(tmp_path / "x"), "b0e6013a1b2c",
+                               run=_fake_images(_IMAGES))
+    assert ok["verified"], ok["problems"]
+
+
+def test_a_service_that_is_not_running_is_refused(rel, tmp_path):
+    live = {s: i for s, i in _IMAGES.items() if s != "llama-server"}
+    ident = rel.deployed_identity("atlas", _deploy_record(tmp_path), "b0e6013",
+                                  run=_fake_images(live))
+    assert ident["mismatch"]
+    assert "llama-server is not running" in ident["problems"]
+
+
+def test_a_stack_with_no_deploy_record_is_unverified_not_refused(rel, tmp_path):
+    ident = rel.deployed_identity("atlas", tmp_path / "none", "b0e6013",
+                                  run=_fake_images(_IMAGES))
+    assert not ident["mismatch"] and not ident["verified"]
+    assert ident["images"] == _IMAGES
+    assert "unverified" in ident["problems"][0]
+
+
+def test_the_runner_refuses_a_mixed_stack_before_any_session(rel, tmp_path, monkeypatch):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    record = _deploy_record(tmp_path)
+    monkeypatch.setattr(rel, "stack_identity", lambda url: {})
+    monkeypatch.setattr(rel, "running_images",
+                        lambda project, run=None: dict(_IMAGES, sandbox="sha256:777"))
+
+    def no_session(*a, **k):
+        raise AssertionError("a session ran on a mixed stack")
+    monkeypatch.setattr(rel, "run_session", no_session)
+    monkeypatch.setattr(sys, "argv", ["e2e-reliability.py", "--workspace", str(ws),
+                                      "--deploy-dir", str(record), "--commit", "b0e6013",
+                                      "--sandbox-container", "", "--tasks", "offbyone"])
+    assert rel.main() == 2
+
+
+def test_the_identity_is_kept_with_every_result(rel, tmp_path):
+    ident = rel.deployed_identity("atlas", _deploy_record(tmp_path), "b0e6013",
+                                  run=_fake_images(_IMAGES))
+    stack = {"grammar_mode": "loose", "commit": ident["commit"], "images": ident["images"],
+             "identity_verified": ident["verified"]}
+    row = rel.result_row(_session(rel, [], tmp_path), {}, stack)
+    assert row["stack"]["commit"] == "b0e6013"
+    assert row["stack"]["images"]["atlas-proxy"] == "sha256:eee"
+    assert row["stack"]["identity_verified"] is True

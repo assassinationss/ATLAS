@@ -4,6 +4,334 @@
 
 ## [Unreleased]
 
+### Added: a driver for the held-out evaluation, with a bare-model baseline
+
+`scripts/eval/` runs a frozen suite through two arms, grades each finished
+workspace, and reports aggregates. `atlas` sends each task through
+`/v1/agent` as the TUI does. `baseline` runs the same model through a
+minimal read, write and run loop, with ATLAS's sampling and limits and none
+of its layers.
+- Graders run on a copy of the workspace, in a container with no network.
+- A suite whose files changed after the freeze is refused, and so is a grader
+  whose pass and fail controls do not separate.
+- A run refuses the development stack and a stack it cannot tie to one
+  commit.
+- Each record ties its result to the frozen suite (the SHA-256 of
+  `suite.json`), the grader image (by ID), the session (start time and
+  workspace), the driver's own commit, the sandbox's network state and, on
+  the baseline arm, the model server's context window and identity. It
+  keeps the grader's whole output. `report` gives pass rates by task kind.
+- `GET /version` reports `session_timeout_s`, and a run refuses a
+  `--budget-s` that differs from it.
+
+The contract is in `docs/EVAL_INTERFACE.md`.
+
+### Added: the reliability runner measures only the stack deployed for its commit
+
+A result is evidence only for the stack that produced it. Before its first
+session, `scripts/e2e-reliability.py` now reads the gated deploy's record
+(`--deploy-dir`, default `~/atlas-ralph`). The commit it measures (`--commit`,
+default: this checkout's HEAD) must be the deployed commit, and each of the
+five services must run the image recorded for that commit. Otherwise the run
+is refused, and each difference is named. Every result keeps the commit, the
+five image ids and whether the identity was verified. A stack with no deploy
+record, such as one on a contributor's machine, runs, but is marked
+unverified.
+
+### Fixed: a question was told to stop reading and write a file
+
+After four read-only calls in a row, the agent loop told the model "Do not read
+more files. Emit a write_file or edit_file tool call now", whatever the request
+was. On a question, that asked for what the request did not want, and it
+stopped the reading the answer needed. In smoke runs, a bug-finding question
+stopped one function short, replied that it could not go on, and the reply was
+reported completed (2 of 84 sessions).
+
+Now a request whose deliverable is an answer (a declared question, or "do not
+change any code") is told to answer when it has what it needs, or to read only
+the part still missing. Work requests keep the write notes.
+
+### Fixed: an edit_file old_str that stopped matching its file ran on to the token cap
+
+An old_str is text copied from the target file, so it can be checked while it
+streams. The loop cut stopped a runaway only when its tail repeated word for
+word, and one carrying changing line numbers never does. In one recorded
+session an old_str ran 25,333 characters and 322 s to the token cap after the
+model wrote a form feed where the file has a newline.
+
+Now, once no completion of what has arrived could match the file, and old_str
+has run 256 more characters, the stream is cut. The model is told the file and
+the line where old_str stopped matching, and that one short line is enough to
+place an edit. "Could match" uses edit_file's own tolerance (exact, curly
+quotes, read_file line numbers, whitespace on each line), so an old_str that
+matches is never cut.
+
+### Changed: V3 ranks the model's own file as a candidate, and keeps its role
+
+V3 used the model's file only as prose in its prompt, never as a candidate,
+so its winner replaced the model's file whenever anything passed: in 33 of
+33 deliveries across 112 recorded sessions. One of those replacements put
+module code in place of a test file. The module code ran, tested nothing,
+and left the run unable to finish.
+
+- The model's exact bytes are now a candidate. They face the same checks as
+  V3's own candidates, and the lens ranks them with the rest. V3 replaces
+  them only with a candidate the lens ranks higher.
+- A replacement must keep the file's role: every top-level def, class and
+  assignment name, and every name the file imports from another project
+  file. A candidate that drops one fails verification, and repair is told
+  which names it dropped.
+- A candidate that differs from the model's file only in whitespace never
+  replaces it.
+- When the model's bytes win, V3 returns them unchanged with
+  `phase_solved: "incumbent"`, and the proxy writes them as the model's own.
+
+### Changed: the TUI and VS Code show whether a run completed, and why
+
+The `done` event carries `status` (completed, incomplete, stopped,
+timed_out, failed) and `reason`, but both clients showed only the summary,
+so a stopped or failed run looked like a finished one until its text was
+read. Both now show the status and the reason at the end of every run, even
+with no summary. Each status has its own color. A missing status reads as
+incomplete, as docs/API.md says.
+
+### Fixed: the lens drift check never ran, because no bundle had a fingerprint
+
+The lens re-scores fixed reference texts at boot and fails `/ready` when an
+energy drifts, which is how a serving stack that no longer matches the
+artifacts (a changed `--pooling` flag, another model) shows up. Nothing
+wrote the fingerprint it compares against. `atlas lens build` now writes
+`drift_fingerprint.json` into every bundle. It is scored the way the service
+scores: through the lens's own embedding path, under the embedding contract
+the bundle declares, and against the llama-server the build reached. The
+file moves with its bundle on activation, is hashed into the provenance
+manifest, is kept by `atlas artifact` snapshot and rollback, and is shipped
+by `atlas lens publish`. When a reference cannot be scored, the bundle gets
+no fingerprint (the check enforces nothing) rather than a wrong one.
+
+### Added: the reliability runner records container restarts and OOM kills
+
+`scripts/e2e-reliability.py` now snapshots each container of the compose
+project (`--compose-project`, default `atlas`) before and after every
+session: its restart count, whether it was OOM-killed, and when it last
+started. A container that restarted, was OOM-killed, was recreated, or went
+away during the session is named in the session's `stack_changes` field, in
+the run log, and in a summary line. The outcome of such a session was
+measured over an unstable stack. When docker cannot be asked, nothing is
+claimed.
+
+### Removed: the unused lens-projects volume on Kubernetes
+
+The geometric-lens deployment created and mounted a `lens-projects`
+PersistentVolumeClaim (sized by `ATLAS_PVC_PROJECTS_SIZE`), but nothing in
+the lens has read it since the project indexer was removed. The template no
+longer creates or mounts it, and `ATLAS_PVC_PROJECTS_SIZE` is gone from
+`atlas.conf.example` (an old value is ignored). `uninstall.sh --data` still
+deletes a `lens-projects` claim that an older install left behind.
+
+### Added: each fenced fetch attempt is recorded in a `fenced_fetch` event
+
+A file body sent through the fenced channel is fetched in up to two
+attempts. Each attempt now streams a `fenced_fetch` event with:
+- the file and the attempt number, and whether the fence grammar was used;
+- how long it took, and when the first frame came;
+- how much content and reasoning arrived;
+- which watchdog cut it, if one did;
+- what happened to it: used, unusable, stalled or cancelled.
+
+The TUI shows one line per attempt. Before, a stall showed only as a pause.
+
+### Fixed: the fenced channel's refusal blamed an earlier stall for its own
+
+When a fetch's own stall turned the fenced channel off, the refusal said the
+channel "stalled earlier in this run". It now says it stalled on this file
+just now.
+
+### Changed: a file the session leaves unparseable must be fixed before it finishes
+
+A file the session leaves unparseable (a new file written with a parse
+error, or a broken file an edit left broken) is now an open repair until it
+parses again, or it is deleted or moved:
+- every tool result names the file, its parse error and the lines around it;
+- the session cannot finish while the file does not parse, and is sent back
+  up to three times;
+- other files can still be written.
+
+If the session ends with the file still broken, it is never reported
+completed. The final message lists what was tried and the error each
+attempt left, the error that remains, and why the session ended, and asks
+you to take a look at the file. The done event names such files in
+`repair_open`, and `repair` events record each step.
+
+### Fixed: structural_edit could break a file that parsed
+
+edit_file, insert_after and replace_lines refuse an edit that leaves a file
+that parsed unable to parse. structural_edit did not: its splice landed with
+a warning. In a smoke run a splice broke a Go file, and the edits after it
+landed on the broken file. structural_edit now refuses such a splice like
+the other tools: the file is not changed, and the refusal gives the parse
+error and the lines around it. A file that already fails stays editable, and
+the rule does not block when the check cannot run.
+
+### Fixed: a reply that looped while it counted ran to the token cap
+
+The repetition cut compares the end of the stream with the text before it. A
+loop whose repeats carry a counting number ("29. I'll check planning.py's
+end. 30. I'll check ...") never repeats exactly, so it was never cut: one ran
+328 s in a smoke run. A text or done reply is now also compared with its
+numbers masked, and that loop is cut after about 50 s. File content in a tool
+call or a fenced block is not masked, because a file can count legitimately
+(CSV rows, numbered tests).
+
+### Fixed: inline code that touched no changed file counted as verification
+
+`python -c "print(1)"` passed as verification: it cleared an earlier failed
+run of the real program and let the session finish. A passing run of inline
+code (`python -c`, `node -e`, `ruby -e`, `perl -e`, `php -r`) now counts
+only when the code names or imports a file the session changed. Otherwise
+it neither verifies nor clears a failure, and the session is told to run
+the program or its tests.
+
+### Fixed: a subshell, a glob or a Java class run verified nothing
+
+A green run counts as verification of the files it names. Three common ways
+to run a program named their files without a plain token, so the run bound
+nothing, and a work request verified that way ended "verification demanded,
+unmet":
+- a subshell, `(cd app && python main.py)`, whose token kept the parenthesis;
+- a glob, `javac *.java`;
+- a Java class run, `java Main` or `java com.example.Main`, which names the
+  class, not `Main.java`.
+
+Tokens now lose surrounding shell punctuation, a glob matches the files it
+would expand to, and after `java` a class name matches its source file.
+
+### Fixed: re-sending a file the session just wrote got a refusal meant for input data
+
+`write_file` refuses to rewrite a file with the contents it already has. The
+refusal was written for input or fixture files ("you do not need to reproduce
+a file"). In the smoke run on 2026-09-28 (add_function rep 2), the file was
+the session's own test file. The model re-sent it three times, never ran it,
+and passing work ended "stopped". For a file the session wrote, the refusal
+now says that the file is on disk with exactly this content, and that the
+next step is to run it or its tests. This holds at any size: the refusal
+used to need 200 bytes, and in the smoke runs of 2026-09-29 a 76-byte test
+file was re-sent five times and passing work ended "stopped" in 4 of 84
+sessions.
+
+### Fixed: the reliability runner counted working guards as service faults
+
+`scripts/e2e-reliability.py` detector H6 ("service fault") flagged every
+`error` event, so Harness Integrity counted two things that were not
+faults:
+- The proxy's model-output guards: a parse failure, content swallowed by an
+  unescaped quote, or content whose bytes were ambiguous. These are the
+  plumbing working (smallrung_toml, 2026-09-27). Any event with a category is
+  now counted on its own summary line ("Model-output guards ... not harness
+  defects"), never as H6.
+- An LLM stream cut by the session's own work deadline (multifile_cli rep 2,
+  2026-09-28). The terminal status already reports it as timed out.
+- A real service fault, such as a refused connection or a 5xx from a
+  service, still counts.
+
+### Fixed: replace_lines called correct-looking numbers "stale" when nothing had changed
+
+When the expected first or last line did not match, `replace_lines` always said
+"The numbers you used are stale". In the smoke run on 2026-09-27
+(smallrung_toml), the file had not changed since the model read it: the model
+had used line 169 for text that is only on lines 1418-1548.
+
+- The refusal now names a cause only when the evidence shows it: the session
+  wrote the file or it changed after the last read (stale), or it still equals
+  what the first full read showed (the numbers never matched). Otherwise it
+  says only that the numbers do not match the file.
+- It also says where the expected text is: not in the file, on one line, or
+  on several lines to choose from.
+- What the tool applies is unchanged.
+
+### Fixed: a fenced write still waited about 50 seconds for the watchdog
+
+The first attempt to fetch a fenced file is constrained by a grammar that
+closes the block with four backticks. The model closes with three, which the
+grammar reads as a line of the file, so the model could not stop. It wrote
+more lines (in one stream, its next tool calls), then went silent, and the
+attempt ended only when the idle watchdog cut it. In the smoke run on 4403ae8
+(2026-09-28), 14 of 29 fenced writes waited that way (median 53 s, maximum
+185 s) before a retry without the grammar.
+
+- For a code file, the grammar now also lets the block end on a line of
+  exactly three backticks. Ending there is allowed, not forced: the line can
+  still be part of the file, and the model decides.
+- Markdown and files of unknown type keep the four-backtick closer, because
+  a ``` line can be their content.
+
+### Security: TUI dependencies with public advisories
+
+- The TUI now uses goldmark 1.7.17 (GO-2026-5320), golang.org/x/net 0.56.0
+  (GO-2026-5942) and golang.org/x/text 0.39.0 (GO-2026-5970).
+- `tui/go.mod` now requires Go 1.26.6. That release also fixes the
+  standard-library advisories that govulncheck reports for older Go 1.26
+  releases. The installer's default Go (`ATLAS_GO_VERSION`) is now 1.26.6.
+- CI sets up Go 1.26.6. setup-go pins `GOTOOLCHAIN=local`, so CI cannot
+  fetch a newer toolchain itself.
+- govulncheck on the TUI: no vulnerabilities found. The proxy image is built
+  with Go 1.27.1, which none of these advisories affect.
+
+### Fixed: the model registry said two quants reuse the Q6_K lens, and the lens rejects them
+
+The registry marked Qwen3.5-9B Q4_K_M and Q8_0 `unverified` and said they use
+the Q6_K lens files. The lens loads a bundle only for the model it was built
+for (same model name and embedding size), so those files never load for them.
+With the lens required, a user who picked one of these quants would be
+stopped after the registry said the lens works. Found while answering
+Discussion #20.
+
+- Both quants are now `no-artifacts`, and their notes say how to build a
+  bundle: install with `--no-lens`, then `atlas bench` and
+  `atlas lens build --from-results`. Their steering vector stays `unverified`
+  (shared with Q6_K).
+- `atlas model`, `atlas doctor`, `atlas init` and the registry notes no
+  longer say that a model without a lens bundle runs with G(x) "silently"
+  switched off. With the lens required, ATLAS stops agent work on such a
+  model, and the messages now say that and name the way out.
+- SUPPORT_MATRIX.md and the macOS guide say the same.
+
+### Changed: torch 2.14.0 in the lens image
+
+- The lens pins torch 2.14.0 (was 2.13.0) in `geometric-lens/requirements.txt`
+  and in the Dockerfile's CPU-only pre-install. Dependabot leaves torch
+  alone, because it can bump only one of the two pins.
+- CI's lens test job pre-installed torch 2.12.1 while the requirements pinned
+  2.13.0, so every run replaced the CPU wheel with PyPI's build. It now
+  pre-installs the pinned version, and a contract test keeps the two equal.
+
+### Fixed: the run was told to stop a server that a planned step still needed
+
+Found by the smoke run on 2026-09-27 (flask_pause rep 1). The gate that asks
+the run to stop its own background jobs before finishing already waited
+while a verification was owed. It did not wait for the plan. The run
+stopped its server, the plan gate then asked for a probe of that server,
+the probe could no longer pass, and the run ended "stopped" on work the
+grader passed.
+
+- The background gate now also waits while the plan gate still owes a step
+  that runs a command, and only while that gate has bounces left, so a spent
+  plan gate cannot keep the job running.
+
+### Fixed: an answer about code past a truncated read counted as evidence
+
+Found by the smoke run on 2026-09-27 (bugfind_tiebreak). The check that
+sends back an answer about a file the session never read worked per file:
+any read of a file counted as seeing all of it. Both reads in that session
+were cut near line 190, the answer named a function it said lay "past the
+provided snippet", and the run ended "completed".
+
+- `read_file` now records which lines it showed. A write or an edit counts
+  as showing the whole file, because the old line numbers no longer hold.
+- An answer that names code (in backticks) whose definition sits only in
+  lines no read showed goes back once, with the file, the line and what the
+  reads showed, so the model reads it before it answers.
+
 ### Fixed: a file written through the fenced channel stalled for five minutes
 
 Found by the smoke run on the deployed build (2026-09-27). When the model
@@ -1258,6 +1586,20 @@ not classify as model or harness) — plus objective code-quality probes from
 - Sandbox base image moved to Python 3.13 (was 3.11, which rejected valid
   3.12 syntax and cost a full session).
 - Nine real `.env` keys were reported as typos by `atlas config validate`.
+
+
+### CodeQL now scans the TypeScript client
+
+- `javascript-typescript` joins the CodeQL language matrix. The VS Code
+  extension shipped ~5,100 lines of TS/JS that no scanner looked at, so the
+  next client lands on a fully covered tree. The extractor needs no build
+  step, and both Go steps already carry `if: matrix.language == 'go'`.
+- The webview's CSP nonce came from `Math.random()` (the shape every VS Code
+  webview sample uses) and is now `randomBytes(16)` — `js/insecure-randomness`
+  is in the `security-and-quality` pack, and a security token has no business
+  coming from a non-cryptographic PRNG. Not a live hole: `renderHtml`
+  interpolates nothing untrusted and `media/chat.js` writes through
+  `textContent`, so there was no injection point a guessed nonce could unlock.
 
 
 ### Simplification campaign (2026-07-29 → 2026-08)

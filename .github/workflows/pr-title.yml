@@ -23,14 +23,20 @@ jobs:
       - name: Check the title
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           types='feat|fix|docs|chore|refactor|perf|test|build|ci|revert|style'
-          if [[ "$TITLE" =~ ^($types)\([a-z0-9][a-z0-9._/-]*\)!?:\ [^[:space:]].{0,99}$ ]]; then
+          # Dependabot writes its own titles, and a group title can pass 100
+          # characters after a rebase (#180). Check its format, not its length.
+          len='{0,99}'
+          if [[ "$AUTHOR" == "dependabot[bot]" ]]; then len='*'; fi
+          re="^($types)\\([a-z0-9][a-z0-9._/-]*\\)!?:\\ [^[:space:]].${len}\$"
+          if [[ "$TITLE" =~ $re ]]; then
             echo "ok: $TITLE"
             exit 0
           fi
           echo "::error::PR title must look like 'type(scope): summary', e.g. 'fix(proxy): stop the retry loop'."
-          echo "::error::type is one of: ${types//|/, }. scope is the component (proxy, tui, cli, v3, lens, sandbox, inference, install, ci, docs, …). Keep it under 100 characters."
+          echo "::error::type is one of: ${types//|/, }. scope is the component in lowercase (proxy, tui, cli, v3, lens, sandbox, inference, install, ci, docs, zh-cn, …). Keep it under 100 characters."
           echo "got: $TITLE"
           exit 1
