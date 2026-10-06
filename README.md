@@ -1,212 +1,197 @@
-<p align="center">
-  <img src="docs/images/herodemo.gif" alt="ATLAS TUI in action"/><br/>
-  <sub><i>The ATLAS TUI live, 10× sped up, running the V3 pipeline on a file creation.</i></sub>
-</p>
+# ATLAS Documentation
 
-<h1 align="center">A.T.L.A.S.</h1>
-<p align="center"><b>Adaptive Test-time Learning and Autonomous Specialization</b></p>
+Task-oriented index for everything under `docs/`. For a directory-by-directory
+map of the repository itself, see [MAP.md](MAP.md).
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-V3.1.6-blue" alt="Version"/>
-  <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"/>
-  <img src="https://img.shields.io/badge/model-agnostic-green" alt="Model-agnostic"/>
-</p>
-
-<p align="center">
-  <a href="https://github.com/inferstep/ATLAS/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/inferstep/ATLAS/test.yml?branch=main&label=tests" alt="Tests"/></a>
-  <a href="https://github.com/inferstep/ATLAS/actions/workflows/install-test.yml"><img src="https://img.shields.io/github/actions/workflow/status/inferstep/ATLAS/install-test.yml?branch=main&label=install%20matrix" alt="Install matrix"/></a>
-  <a href="https://github.com/inferstep/ATLAS/actions/workflows/codeql.yml"><img src="https://img.shields.io/github/actions/workflow/status/inferstep/ATLAS/codeql.yml?branch=main&label=codeql" alt="CodeQL"/></a>
-  <a href="https://github.com/inferstep/ATLAS/actions/workflows/container-scan.yml"><img src="https://img.shields.io/github/actions/workflow/status/inferstep/ATLAS/container-scan.yml?label=container%20scan" alt="Container scan"/></a>
-  <a href="https://github.com/inferstep/ATLAS/actions/workflows/verify-tags.yml"><img src="https://img.shields.io/github/actions/workflow/status/inferstep/ATLAS/verify-tags.yml?label=release%20signature" alt="Release signature"/></a>
-  <a href="https://scorecard.dev/viewer/?uri=github.com/inferstep/ATLAS"><img src="https://api.scorecard.dev/projects/github.com/inferstep/ATLAS/badge" alt="OpenSSF Scorecard"/></a>
-</p>
-
-<p align="center">
-  <a href="docs/lang/zh-CN/README.md"><img src="https://img.shields.io/badge/文档-简体中文-orange" alt="简体中文"/></a>
-  <a href="docs/lang/ja/README.md"><img src="https://img.shields.io/badge/ドキュメント-日本語-orange" alt="日本語"/></a>
-  <a href="docs/lang/ko/README.md"><img src="https://img.shields.io/badge/문서-한국어-orange" alt="한국어"/></a>
-</p>
-
-
-## 🌎 What is ATLAS?
-
-**ATLAS is a local coding agent that brings frontier-style reasoning and verification to compact open models.** It puts more intelligence in the system around the model (planning, candidate generation, quality scoring, sandboxed testing, and repair) so smaller models can tackle real software work entirely on your own hardware, without a hosted API or per-token fees.
-
-## 💡 Why ATLAS?
-
-* **Get more from smaller models.** ATLAS adds planning, candidate selection, verification, and repair around the model instead of depending on a single generation.
-* **Verify before accepting.** Generated code can be compiled, tested, and corrected inside an isolated execution environment.
-* **Spend compute where it matters.** Straightforward edits take a shorter path, while harder tasks receive more candidates, reasoning, and validation.
-* **Run your own model.** Use a compatible GGUF model on NVIDIA, AMD, Apple Silicon, Vulkan, or CPU-supported hardware.
-* **Keep control local.** ATLAS does not intentionally upload your repository or prompts to a hosted model or ATLAS-operated service. Sandbox commands have outbound network access by default; set `ATLAS_SANDBOX_NET_INTERNAL=true` to disable it.
-* **Own the full stack.** ATLAS is open source and self-hosted. It requires no hosted model or third-party model-provider API key; a local per-installation service token authenticates ATLAS services.
+> 翻訳 / 번역 / 翻译: [简体中文](lang/zh-CN/README.md) ·
+> [日本語](lang/ja/README.md) · [한국어](lang/ko/README.md)
+> (README, SETUP, ARCHITECTURE, TROUBLESHOOTING are translated; everything
+> else is English-only.)
 
 ---
 
-## 📰 Latest News
+## What are you trying to do?
 
-- **2026-10-01** - **[V3.1.6 "Maia" released](https://github.com/inferstep/ATLAS/releases/tag/v3.1.6)** - security fix for the command policy ([GHSA-m9w4-p32x-chx9](https://github.com/inferstep/ATLAS/security/advisories/GHSA-m9w4-p32x-chx9), reported and fixed by [@Rendegou](https://github.com/Rendegou)). Please upgrade.
-- **2026-09-29** - **[V3.1.5 "Maia" released](https://github.com/inferstep/ATLAS/releases/tag/v3.1.5)** - security fix for tool argument names ([GHSA-c3p6-m657-h629](https://github.com/inferstep/ATLAS/security/advisories/GHSA-c3p6-m657-h629)). Please upgrade.
-- **2026-09-27** - **[V3.1.4 "Maia" released](https://github.com/inferstep/ATLAS/releases/tag/v3.1.4)** - the move to inferstep/ATLAS, security fixes ([GHSA-5hvw-59r4-7rcq](https://github.com/inferstep/ATLAS/security/advisories/GHSA-5hvw-59r4-7rcq)), and the contributor setup.
-- **2026-07-06** - **[V3.1.3 "Maia" released](https://github.com/inferstep/ATLAS/releases/tag/v3.1.3)** - production-platform pass: staged upgrade/rollback with auto-restore, SQLite state store (no more Redis), signed artifact manifests, structured logs + correlation IDs, interactive permissions, session resume, and two adversarial bug-fix sweeps
-- **2026-06-17** - **[V3.1.2 "Maia" released](https://github.com/inferstep/ATLAS/releases/tag/v3.1.2)** - broader hardware reach (ROCm / Metal / Vulkan), bring-your-own-model Lens + ASA training, in-the-loop lens retraining from your own workloads (since removed; see the CHANGELOG), and an agent-reliability pass
-- **2026-05-12** - **[V3.1.0 "Maia" released](https://github.com/inferstep/ATLAS/releases/tag/v3.1.0)** - native Bubbletea TUI, one-command bootstrap, streaming Lens + ASA activation steering, AST-aware surgical edits
-- **2026-03-26** - [Hacker News front page](https://news.ycombinator.com/item?id=47533297) - 489 points, 285 comments
-- **2026-03-05** - **V3.0 released** - the multi-phase V3 pipeline on frozen Qwen3-14B. *The 74.6% LiveCodeBench figure published with this release is withdrawn: the benchmark runner never ran LiveCodeBench's hidden tests, and it counted a task as passed when any of three candidates, or a repair shown the failing output, passed the examples printed in the problem ([withdrawal notice](docs/reports/V3_ABLATION_STUDY.md)). ATLAS will be re-measured once the current product is re-verified.*
-- **2026-02-18** - **[V2.0 released](CHANGELOG.md)** - benchmark infrastructure, HumanEval/MBPP/LiveCodeBench/GPQA/SciCode evaluation suite
+### Install ATLAS
 
-## ⭐ Star History
+- [GETTING_STARTED.md](GETTING_STARTED.md) — the beginner path: reality-check
+  your hardware, install, verify, and run a first task.
+- [SETUP.md](SETUP.md) — all install paths: one-shot bootstrap, Docker
+  Compose, bare metal, K3s. Start at
+  [§ Pick your install path](SETUP.md#pick-your-install-path).
+- [SETUP_MACOS.md](SETUP_MACOS.md) — Apple Silicon (native Metal
+  llama-server + Docker for the rest).
+- Sizing questions before you download anything:
+  [SETUP.md § Supported GPUs](SETUP.md#supported-gpus) and
+  [TROUBLESHOOTING.md § What fits on my GPU?](TROUBLESHOOTING.md#what-fits-on-my-gpu)
+- What is and isn't supported, with evidence:
+  [SUPPORT_MATRIX.md](../SUPPORT_MATRIX.md)
 
-<!-- Self-hosted chart: rendered weekly by .github/workflows/star-chart.yml
-     onto the `star-history` asset branch (scripts/star-history-chart.py).
-     Replaces the star-history.com embed, whose shared token pool
-     rate-limits unpredictably. -->
-<a href="https://github.com/inferstep/ATLAS/stargazers">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/inferstep/ATLAS/star-history/star-history-dark.svg" />
-   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/inferstep/ATLAS/star-history/star-history-light.svg" />
-   <img alt="Star history chart" src="https://raw.githubusercontent.com/inferstep/ATLAS/star-history/star-history-light.svg" width="100%" />
- </picture>
-</a>
+### Use ATLAS day to day
 
-<sub>Updated weekly (Mondays, via GitHub Actions).</sub>
+- [CLI.md](CLI.md) — the TUI and every `atlas` subcommand: panes,
+  [slash commands](CLI.md#slash-commands), permission modes,
+  `atlas model` / `tier fit` / `onboard` / `bench` / `lens` / `asa`.
+- [CONFIGURATION.md](CONFIGURATION.md) — every environment variable and
+  internal constant, per service; includes
+  [adding your own model](CONFIGURATION.md#adding-your-own-model-drop-in--unregistered).
+- [OPERATIONS.md](OPERATIONS.md) — health, logs, runbooks, upgrade,
+  rollback, backup/restore.
+- [PUBLISHING.md](PUBLISHING.md) — share trained Lens / ASA artifacts
+  (HuggingFace upload + registry PR).
 
----
+### Integrate with ATLAS
 
-## 🧱 What ATLAS Does
+- [API.md](API.md) — HTTP reference for all five services (proxy,
+  v3-service, geometric-lens, sandbox, llama-server).
+- [PROTOCOL.md](PROTOCOL.md) — the typed SSE event envelope shared by
+  proxy, v3-service, and clients.
+- [EVIDENCE_WIRE.md](EVIDENCE_WIRE.md) — the versioned evidence envelope
+  between v3-service and the proxy, and the rule that authorizes delivery.
+- [CANDIDATE_AUTHORIZATION.md](CANDIDATE_AUTHORIZATION.md) — typed
+  obligations, evidence provenance, candidate staging, and the observe-only
+  authorization and feasibility decisions.
+- [CANDIDATE_POLICY.md](CANDIDATE_POLICY.md) — the one rule of candidate
+  delivery: when the candidate V3 selected may replace the model's own
+  work, and when it may not.
+- [schemas/](schemas/) — machine-readable contracts:
+  [proxy_openapi.yaml](schemas/proxy_openapi.yaml),
+  [error_envelope.schema.json](schemas/error_envelope.schema.json),
+  [sse_envelope.schema.json](schemas/sse_envelope.schema.json).
 
-1. **[atlas-tui](docs/CLI.md)** - native Bubbletea terminal UI; the canonical chat client. Type `atlas` in any project directory to launch it.
-   - [Live pipeline view](docs/CLI.md#panes) - watch V3 stages stream in a side pane
-   - [Slash commands](docs/CLI.md#slash-commands) - `/add`, `/diff`, `/commit`, `/run` for local file context and shell-out
-   - [Input modes](docs/CLI.md#input-modes) - chat, `!bash`, and `/slash` with a hint dropdown
+### Fix a problem
 
-2. **[atlas-proxy](docs/ARCHITECTURE.md#3-atlas-proxy-outer-layer)** - Go agent loop that orchestrates the system.
-   - [Tool-call routing](docs/ARCHITECTURE.md#tools) - classifies file operations by complexity tier
-   - [Grammar enforcement](docs/ARCHITECTURE.md#grammar-enforcement) - GBNF schemas strongly steer output toward the expected JSON shapes, with proxy-side recovery for malformed or truncated output
-   - [BiasBusters](docs/ARCHITECTURE.md#tool-selection-bias-mitigations) - four composed mitigations (descriptions, grammar bans, system notes, ASA steering) that push the model toward `structural_edit` for structural code edits
-   - [Safety limits](docs/ARCHITECTURE.md#safety-limits) - turn caps, token budgets, timeouts
+1. [TROUBLESHOOTING.md § Quick Diagnostics](TROUBLESHOOTING.md#quick-diagnostics)
+   — find which service is unhappy in three commands.
+2. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — issues organized by
+   service (Docker/GPU, llama-server, proxy, lens, sandbox, benchmarks),
+   with an exact-error index up top.
+3. `atlas doctor` for a one-shot health report, and
+   `atlas diagnostics collect` for a shareable, redacted support bundle
+   (both documented in [CLI.md](CLI.md)).
+4. Still stuck? [Open an issue](https://github.com/inferstep/ATLAS/issues)
+   — paste the doctor output.
 
-3. **[V3 Pipeline](docs/ARCHITECTURE.md#4-v3-pipeline-inner-layer)** - multi-phase code generation; turns a single prompt into a verified candidate.
-   - [PlanSearch](docs/ARCHITECTURE.md#pipeline-flow) - constraint-driven structured planning
-   - [DivSampling](docs/ARCHITECTURE.md#pipeline-flow) - diverse candidates across temperature and strategy
-   - [Budget tiers](docs/ARCHITECTURE.md#pipeline-flow) - the allocator picks a compute tier per task; today the tier sets how many candidates are generated, not thinking depth
-   - [PR-CoT Repair](docs/ARCHITECTURE.md#pipeline-flow) - repairs failing candidates from the sandbox's error output
-   - [Refinement Loops](docs/ARCHITECTURE.md#pipeline-flow) - sandbox verify and correct, then repeat
+### Understand how it works
 
-4. **[Geometric Lens](docs/ARCHITECTURE.md#5-geometric-lens)** - energy-based scoring over the model's own embeddings, no external oracle. ([What is a "Geometric Lens"?](docs/ARCHITECTURE.md#why-geometric-lens))
-   - [C(x) Cost Field](docs/ARCHITECTURE.md#scoring-models) - model-hidden-dim→512→128→1 MLP that scores candidate quality
-   - [G(x) Quality Prediction](docs/ARCHITECTURE.md#scoring-models) - XGBoost ensemble used for selection
-   - [Per-step scoring](docs/API.md#geometric-lens-port-8099) - per-token C(x)/G(x) scoring of writes, with per-model calibrated thresholds driving interventions
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the two-layer design: outer agent
+  loop, inner V3 pipeline, Geometric Lens, sandbox.
+- [PLAN_MODE.md](PLAN_MODE.md) — per-turn pre-flight planning.
+- [SOURCES.md](SOURCES.md) — the research papers behind each component.
+- [reports/V3_ABLATION_STUDY.md](reports/V3_ABLATION_STUDY.md) — the
+  V3.0 ablation report; its 74.6% result is withdrawn (notice at the top).
+- [reports/CALL_GRAPH_REASONING_V3.md](reports/CALL_GRAPH_REASONING_V3.md)
+  — structural call-graph reasoning design notes.
+- [reports/RPG_WAVELET_PLANNING_V3_2.md](reports/RPG_WAVELET_PLANNING_V3_2.md)
+  — the V3.2 architecture-first planning design record: built, measured,
+  removed; kept as the record of #148.
+- [reports/ablation/README.md](reports/ablation/README.md) — the raw
+  per-task traces (LiveCodeBench, 599 tasks) behind the withdrawn result.
+- [reports/archive/](reports/archive/) — the V2.5 ablation study and the
+  archive note, kept for reference.
+- [adr/](adr/README.md) — architecture decision records 0001-0011 (trust
+  model, Redis, per-model bundles, fail-soft V3, lens optionality
+  (superseded), release strategy, the SQLite store (retired), harness
+  mechanisms, embedding convention, lens capacity, the lens is required).
+- [STORY.md](STORY.md) — why this project exists.
 
-5. **[Sandbox](docs/ARCHITECTURE.md#6-sandbox)** - isolated execution for build verification.
-   - Multi-language execution: Python, Rust, Go, C, Shell, others
-   - Compilation and linting before scoring
-   - Runs both generated and existing test suites
+### Contribute
 
-6. **[llama-server](docs/CONFIGURATION.md#6-llama-server)** - local LLM inference on one consumer GPU.
-   - GPU-accelerated quantized inference (Q6_K / Q4_K_M) - NVIDIA CUDA, AMD ROCm, Apple Metal (macOS hybrid), and Vulkan; Intel SYCL on the roadmap
-   - Grammar-constrained decoding at the token level
-   - Self-embeddings, so the lens doesn't need a second model
-
-Full documentation (setup, architecture, configuration, troubleshooting, benchmark reports, and the [research behind each component](docs/SOURCES.md)) lives in the [docs/](docs/) directory.
-
----
-
-## 🚀 Get Started
-
-One-shot install:
-```bash
-curl -fsSL https://raw.githubusercontent.com/inferstep/ATLAS/main/scripts/atlas-bootstrap.sh | bash
-```
-
-Prefer not to pipe a moving script into bash? Same installer, two more careful ways to run it:
-```bash
-# Pinned to a release: script, checkout, and images all at the signed tag
-curl -fsSL https://raw.githubusercontent.com/inferstep/ATLAS/v3.1.6/scripts/atlas-bootstrap.sh \
-  | ATLAS_BOOTSTRAP_REF=v3.1.6 bash
-
-# Review before running
-curl -fsSL -o atlas-bootstrap.sh https://raw.githubusercontent.com/inferstep/ATLAS/main/scripts/atlas-bootstrap.sh
-less atlas-bootstrap.sh
-bash atlas-bootstrap.sh
-```
-
-The script detects your distro (Ubuntu, Debian, RHEL, Fedora, Rocky, Alma) and your GPU vendor (NVIDIA → nvidia-container-toolkit; AMD → ROCm device passthrough), installs the appropriate runtime, downloads the model weights, builds the ASA steering vector, and starts the stack. Expect 10-30 minutes; the model download is the bottleneck.
-
-Then in any project directory, run `atlas`.
-
-**Requirements**
-
-| | |
-|---|---|
-| GPU | 16 GB+ VRAM. NVIDIA (CUDA, Supported), AMD (ROCm, Community-tested), or Apple Silicon (Metal, macOS hybrid, Supported); Vulkan (Preview) covers most other GPUs. The prebuilt CUDA image targets Blackwell (RTX 50xx); older NVIDIA GPUs need a one-time local rebuild (see [SETUP.md § CUDA Compute Capability](docs/SETUP.md#cuda-compute-capability-dockerfilev31)). Levels: [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md); GPU list: [SETUP.md § Supported GPUs](docs/SETUP.md#supported-gpus). To size a specific model to your card, see [What fits on my GPU?](docs/TROUBLESHOOTING.md#what-fits-on-my-gpu). |
-| Runtime | Docker (NVIDIA: + nvidia-container-toolkit; AMD: standalone Docker is enough) or Podman |
-| Python | 3.9+ |
-| Disk | ~20 GB CUDA / ~22 GB ROCm (model weights + container images) |
-
-Apple Silicon runs natively through the macOS hybrid Metal path (native llama-server + Docker for the rest - see **[SETUP_MACOS.md](docs/SETUP_MACOS.md)**); Intel Arc (SYCL) is on the roadmap. For the manual install path (Docker Compose, bare-metal, K3s) and the full set of bootstrap flags, see **[SETUP.md](docs/SETUP.md)**.
-
----
-
-## ⚠️ Known Limitations
-
-- **Linux Docker stack, plus a native macOS path.** NVIDIA (Supported), AMD ROCm (Community-tested), and Vulkan (Preview) Docker paths exist today; Apple Silicon (Supported) runs via the native macOS hybrid Metal path ([#32](https://github.com/inferstep/ATLAS/issues/32)). Intel Arc / SYCL is Roadmap. Level definitions: [SUPPORT_MATRIX.md](SUPPORT_MATRIX.md).
-- **ATLAS has no current benchmark result.** The V3.0 LiveCodeBench figure is withdrawn (see Latest News), and no capability or reliability figure has been measured for the current release. Numbers will be published only after a re-measurement on held-out tasks; model-specific results are tracked in [#28](https://github.com/inferstep/ATLAS/issues/28).
-- **Complex feature additions can be inconsistent.** Compact models sometimes spend agent turns exploring an unfamiliar codebase before writing code.
-- **Grammar-constrained decoding is slower than unconstrained decoding.**
-
----
-
-## 🗺️ Roadmap
-
-**V3.1.3 "Maia"** - Current release. Production-platform pass on top of V3.1.2: staged `atlas upgrade`/`rollback` with automatic restore, SQLite state store replacing Redis ([ADR 0007](docs/adr/0007-sqlite-state-store.md); retired on `dev` in 2026-09 with the pattern cache, its only user), signed artifact manifests, structured JSON logs with cross-service correlation IDs, interactive permission prompts, session resume, typed config validation/migration, and two adversarial bug-fix sweeps (33 confirmed fixes).
-
-**V3.1.2 "Maia"** - Broader hardware reach, bring-your-own-model training, and an agent-reliability pass on top of the V3.1.0 base (TUI, one-command install, streaming Lens + ASA).
-- Hardware reach: AMD ROCm via llama.cpp incl. RDNA4 / RX 9070 (gfx1200/gfx1201) ([#26](https://github.com/inferstep/ATLAS/issues/26)); Apple Silicon native macOS hybrid Metal path ([#32](https://github.com/inferstep/ATLAS/issues/32), see [SETUP_MACOS.md](docs/SETUP_MACOS.md)); Vulkan universal fallback covering AMD / Intel / Snapdragon / Apple-via-MoltenVK / CPU ([#114](https://github.com/inferstep/ATLAS/issues/114)).
-- Bring-your-own-model: local Lens training pipeline (`atlas lens build`, [#100](https://github.com/inferstep/ATLAS/issues/100)) and ASA per-model calibration parity (`atlas asa check/build/publish`, [#113](https://github.com/inferstep/ATLAS/issues/113)) - train Lens + ASA artifacts for additional GGUFs, with per-model operating thresholds that ship with the lens.
-- In-the-loop lens training (TUI `/good` · `/bad` · `/deny` → `atlas lens retrain`) shipped in this release and was removed on `dev` in 2026-09: the corpus it collected mixed evaluation runs into training data. See the CHANGELOG.
-- Agent reliability: tool-result visibility fix, read-dedup, traceback → directed-edit, `move_file`, pip-install / case-mismatch steers, sandbox shell policy + host-sized cgroup limits.
-- Structural call-graph reasoning ([#39](https://github.com/inferstep/ATLAS/issues/39) / [#125](https://github.com/inferstep/ATLAS/pull/125), thanks [@yogthos](https://github.com/yogthos)); ARCHITECTURE.md translated to zh-CN / ja / ko ([#25](https://github.com/inferstep/ATLAS/issues/25)).
-
-**V3.2** - Next milestone: deeper code reasoning.
-- RPG-style architecture-first planning was built ([#120](https://github.com/inferstep/ATLAS/issues/120)), A/B-measured, and removed: no improvement on the reference model at ~10x planning latency. [#148](https://github.com/inferstep/ATLAS/issues/148) is the record; the design study is [docs/reports/RPG_WAVELET_PLANNING_V3_2.md](docs/reports/RPG_WAVELET_PLANNING_V3_2.md).
-- Structural code reasoning (tail) - deepen the shipped call-graph layer ([#39](https://github.com/inferstep/ATLAS/issues/39)).
-- Reasoning with sampling - efficiency and quality gains ([#9](https://github.com/inferstep/ATLAS/issues/9)).
-- Deferred infra: automated HuggingFace submission pipeline ([#102](https://github.com/inferstep/ATLAS/issues/102)); ROCm on K3s / Kubernetes; formal registry-model benchmarks - LiveCodeBench, GPQA Diamond, SciCode ([#28](https://github.com/inferstep/ATLAS/issues/28)).
-
-**Backlog / help wanted**
-- Hardware: ARM64 multi-arch builds ([#115](https://github.com/inferstep/ATLAS/issues/115)), multi-GPU for larger models ([#34](https://github.com/inferstep/ATLAS/issues/34)), Intel oneAPI / SYCL ([#27](https://github.com/inferstep/ATLAS/issues/27)).
-- Tooling: VS Code / JetBrains extension ([#35](https://github.com/inferstep/ATLAS/issues/35)).
-- Sandbox languages: Java / Kotlin ([#29](https://github.com/inferstep/ATLAS/issues/29)), Ruby / PHP ([#30](https://github.com/inferstep/ATLAS/issues/30)).
-- Architecture: model-agnostic platform ([#66](https://github.com/inferstep/ATLAS/issues/66)).
+- [../CONTRIBUTING.md](../CONTRIBUTING.md) — from finding an issue and
+  `/claim` to review and release; style, tests, and the developer quality
+  gate (`scripts/production-readiness.py`).
+- [DEVELOPMENT.md](DEVELOPMENT.md) — dev mode, targeted rebuilds,
+  running the proxy on the host against the compose stack.
+- [CODE_STYLE.md](CODE_STYLE.md) — how ATLAS code should read; applies to
+  new code and to every refactor.
+- [quality/gates.md](quality/gates.md) — the checks on a pull request,
+  which of them are required, how the outside tools are set, and the
+  measured baselines.
+- [EVAL_INTERFACE.md](EVAL_INTERFACE.md) — the held-out evaluation
+  interface: the contract between the evaluation session and the
+  development side for the capability and reliability proofs.
+- [RELEASE.md](RELEASE.md) — the release contract, verification levels,
+  versioning, and the release and hotfix steps.
+- [TRIAGE.md](TRIAGE.md) — how new issues become Ready work.
+- [INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md) — what to do when a key
+  leaks, a release is bad, or automation misbehaves.
+- [CONTAINER_PACKAGING.md](CONTAINER_PACKAGING.md) — image accounts,
+  writable dirs, dependency pinning.
+- [../GOVERNANCE.md](../GOVERNANCE.md), [../MAINTAINERS.md](../MAINTAINERS.md),
+  [../SECURITY.md](../SECURITY.md),
+  [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md),
+  [../THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)
+- READMEs beside the code they describe (`proxy/`, `atlas/bench/`,
+  `extensions/vscode/`, `geometric-lens/`) live where the code is;
+  see [MAP.md](MAP.md) for the repository map.
 
 ---
 
-## ❤️ Support ATLAS
+## Shortcuts by situation
 
-ATLAS is built by a single college student in his free time on a single consumer GPU ([the story behind ATLAS](docs/STORY.md)). If the project has been useful to you and you want to help keep it sustainable, please consider **[sponsoring on GitHub](https://github.com/sponsors/itigges22)**.
+**New to ATLAS.** [GETTING_STARTED.md](GETTING_STARTED.md), which walks the
+whole first hour; keep [TROUBLESHOOTING.md](TROUBLESHOOTING.md) open in a tab.
 
-Sponsorship directly funds:
+**Know what you need.** Use the section index above, or
+[MAP.md](MAP.md) if you're looking for code rather than docs.
 
-- **Compute & hardware** - more GPUs for faster benchmark iteration, access to architectures the maintainer can't afford (AMD ROCm, higher VRAM cards, cloud rentals for larger-model experiments).
-- **Contributor bounties** - meaningful compensation for external contributors who put real time into substantive PRs, so ATLAS can grow faster than a single-person pace allows.
-- **Research** - continued academic engagement around the architecture, from future workshop and conference submissions to paper writing and collaborations that validate and extend the approach.
-- **Community** - continued support for the community and platforms ATLAS runs on, including documentation, user-facing channels, and educational content that help ATLAS reach more developers and better serve the ones already using it.
+**Something's broken.**
+[TROUBLESHOOTING.md § Quick Diagnostics](TROUBLESHOOTING.md#quick-diagnostics)
+→ the per-service section for whichever health field is `false` →
+`atlas doctor` → open an issue with the output.
 
-Every sponsor is credited in the release notes of the version they helped fund.
-
----
-
-## 🤝 Contributing
-
-ATLAS is developed in the open and welcomes contributors and core maintainers. Bug fixes, accelerator support, and larger subsystem work are all welcome.
-
-Found a bug or hit a wall? **[Open an issue](https://github.com/inferstep/ATLAS/issues)** - you don't need to submit a fix. Bug reports and feedback help just as much as code.
-
-See **[CONTRIBUTING.md](CONTRIBUTING.md)** for guidelines and the [repository map](docs/MAP.md) for an overview of the codebase layout.
+**Want to read everything.** Follow the
+[start-to-finish reading order](#read-atlas-start-to-finish) below.
 
 ---
 
-## 📄 License
+## Core terms (one line each)
 
-Licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).
+- **Direct agent / outer loop** — the Go proxy's tool-calling loop; works
+  with any GGUF, no per-model training ([ARCHITECTURE.md](ARCHITECTURE.md)).
+- **V3 pipeline / inner layer** — multi-candidate generation, scoring,
+  sandbox verification, and repair for non-trivial files
+  ([ARCHITECTURE.md](ARCHITECTURE.md)).
+- **Tiers (T0–T3)** — two separate classifications. The per-file tier gates
+  V3: T1 writes directly, T2/T3 use the pipeline. The per-message tier only
+  distinguishes T0 (conversational: 5-turn cap, no plan) from everything
+  else, since the turn cap and plan gate are all it feeds
+  ([ARCHITECTURE.md](ARCHITECTURE.md)).
+- **Geometric Lens, C(x) / G(x)** — energy-based candidate scoring over the
+  model's own embeddings; per-model trained bundle
+  ([ARCHITECTURE.md](ARCHITECTURE.md), [../SUPPORT_MATRIX.md](../SUPPORT_MATRIX.md)).
+- **ASA** — activation-steering control vector nudging tool selection;
+  per-model, opt-in until validated ([CLI.md](CLI.md), [PUBLISHING.md](PUBLISHING.md)).
+- **Sandbox** — isolated multi-language execution used for verification
+  ([ARCHITECTURE.md](ARCHITECTURE.md), [API.md](API.md)).
+- **GBNF grammar enforcement** — token-level constrained decoding that strongly
+  steers tool calls toward the expected JSON schema, with proxy-side recovery
+  for malformed or truncated output ([ARCHITECTURE.md](ARCHITECTURE.md)).
+
+---
+
+## Read ATLAS start to finish
+
+In order, each building on the last:
+
+1. [../README.md](../README.md) — what and why
+2. [STORY.md](STORY.md) — background
+3. [GETTING_STARTED.md](GETTING_STARTED.md) — the first hour
+4. [SETUP.md](SETUP.md) / [SETUP_MACOS.md](SETUP_MACOS.md) — install
+5. [CLI.md](CLI.md) — the surface you actually touch
+6. [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — failure modes and diagnosis
+7. [CONFIGURATION.md](CONFIGURATION.md) — every knob, per service
+8. [ARCHITECTURE.md](ARCHITECTURE.md) — how the pieces fit
+9. [PLAN_MODE.md](PLAN_MODE.md) — pre-flight planning
+10. [PROTOCOL.md](PROTOCOL.md) — the event contract
+11. [API.md](API.md) — the full HTTP surface
+12. [reports/V3_ABLATION_STUDY.md](reports/V3_ABLATION_STUDY.md) — historical V3.0 ablation report (result withdrawn)
+13. [reports/CALL_GRAPH_REASONING_V3.md](reports/CALL_GRAPH_REASONING_V3.md)
+14. [SOURCES.md](SOURCES.md) — the research it stands on
+15. [adr/](adr/README.md) — decisions 0001 through 0011, in order (0007 retired)
+16. [../SUPPORT_MATRIX.md](../SUPPORT_MATRIX.md) — claims and their evidence
+17. [OPERATIONS.md](OPERATIONS.md) — running it long-term
+18. [DEVELOPMENT.md](DEVELOPMENT.md), [../CONTRIBUTING.md](../CONTRIBUTING.md),
+    [RELEASE.md](RELEASE.md), [PUBLISHING.md](PUBLISHING.md),
+    [CONTAINER_PACKAGING.md](CONTAINER_PACKAGING.md) — working on it
+19. [../CHANGELOG.md](../CHANGELOG.md) — how it got here
