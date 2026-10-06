@@ -84,7 +84,7 @@ map of the repository itself, see [MAP.md](MAP.md).
 - [reports/RPG_WAVELET_PLANNING_V3_2.md](reports/RPG_WAVELET_PLANNING_V3_2.md)
   — the V3.2 RPG/wavelet planning design record: built, A/B-measured (no
   improvement on the reference 12B at ~10x planning latency), and removed in
-  the 2026-08 simplification; kept in-tree per #148.
+  the 2026-08 simplification; kept in-tree per [#148](https://github.com/inferstep/ATLAS/issues/148).
 - [reports/ablation/README.md](reports/ablation/README.md) — the raw
   per-task traces behind the V3.0 ablation study (LiveCodeBench, 599 tasks).
 - [reports/archive/](reports/archive/) — kept-for-reference reports,
