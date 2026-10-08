@@ -161,7 +161,7 @@ Apple Silicon は macOS ハイブリッド Metal パス（ネイティブ llama-
 **V3.1.2 "Maia"** - V3.1.0 の基盤（TUI、ワンコマンドインストール、ストリーミング Lens + ASA）の上に、ハードウェア対応の拡大、持ち込みモデルのトレーニング、エージェント信頼性の強化を実施。
 - ハードウェア対応: llama.cpp 経由の AMD ROCm — RDNA4 / RX 9070 (gfx1200/gfx1201) を含む ([#26](https://github.com/inferstep/ATLAS/issues/26))。Apple Silicon のネイティブ macOS ハイブリッド Metal パス ([#32](https://github.com/inferstep/ATLAS/issues/32)、[SETUP_MACOS.md](../../SETUP_MACOS.md) を参照)。AMD / Intel / Snapdragon / MoltenVK 経由の Apple / CPU をカバーする Vulkan ユニバーサルフォールバック ([#114](https://github.com/inferstep/ATLAS/issues/114))。
 - 持ち込みモデル: ローカル Lens トレーニングパイプライン (`atlas lens build`、[#100](https://github.com/inferstep/ATLAS/issues/100)) と ASA のモデル別キャリブレーション同等化 (`atlas asa check/build/publish`、[#113](https://github.com/inferstep/ATLAS/issues/113)) — 追加の GGUF 向けに Lens + ASA アーティファクトをトレーニングし、lens に同梱されるモデル別の動作閾値付きで出荷。
-- イザループ lens トレーニング（TUI の `/good`・`/bad`・`/deny` → `atlas lens retrain`）はこのリリースで出荷されましたが、2026-09 に `dev` で削除されました: 収集したコーパスが評価実行をトレーニングデータに混入させていたためです。詳細は CHANGELOG を参照してください。
+- インザループ lens トレーニング（TUI の `/good`・`/bad`・`/deny` → `atlas lens retrain`）はこのリリースで出荷されましたが、2026-09 に `dev` で削除されました: 収集したコーパスが評価実行をトレーニングデータに混入させていたためです。詳細は CHANGELOG を参照してください。
 - エージェント信頼性: ツール結果の可視性修正、読み取り重複排除、トレースバック → 指向的編集、`move_file`、pip インストール / 大文字小文字不一致のステア、サンドボックスシェルポリシー + ホストサイズの cgroup 制限。
 - 構造的な呼び出しグラフ推論 ([#39](https://github.com/inferstep/ATLAS/issues/39) / [#125](https://github.com/inferstep/ATLAS/pull/125)、[@yogthos](https://github.com/yogthos) に感謝)。ARCHITECTURE.md の zh-CN / ja / ko 翻訳 ([#25](https://github.com/inferstep/ATLAS/issues/25))。
 
