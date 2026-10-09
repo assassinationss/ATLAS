@@ -48,7 +48,7 @@ llama-server は GPU を使用する唯一のサービスです。それ以外�
 | バックエンド | ステータス (V3.1.x) | イメージ / ビルドパス | Compose オーバーライド | 検証済みカード |
 |---|---|---|---|---|
 | **CUDA** (NVIDIA) | サポート対象 (Supported)（V3.1.0 以降） | `inference/Dockerfile.v31` → `atlas-llama` | (デフォルト) | RTX 5060 Ti 16GB（標準構成）。公開イメージは Blackwell（compute capability 12.0/12.1）のみを対象にコンパイルされており、それより前の世代はローカル再ビルドが必要 — [SETUP.md](../../SETUP.md) を参照 |
-| **ROCm / HIP** (AMD) | コミュニティ検証済み (Community-tested)（V3.1.1 以降） | `inference/Dockerfile.rocm` → `atlas-llama-rocm` | `docker-compose.rocm.yml` | RX 7900 XTX（コミュニティによるスモークテスト、GH #26） |
+| **ROCm / HIP** (AMD) | コミュニティ検証済み (Community-tested)（V3.1.1 以降） | `inference/Dockerfile.rocm` → `atlas-llama-rocm`、ホスト上でビルド（`pull_policy: build`; GHCR イメージなし） | `docker-compose.rocm.yml` | RX 7900 XTX（コミュニティによるスモークテスト、GH #26） |
 | **Metal** (Apple Silicon) | サポート対象 ([#32](https://github.com/inferstep/ATLAS/issues/32)) | ハイブリッド: ネイティブ llama-server (Metal) + 残りは Docker（macOS は GPU をコンテナにパススルーできないため） | `docker-compose.macos.yml` | M シリーズ; 16 GB 以下では Q4_K_M、24 GB 以上のユニファイドメモリでは Q6_K |
 | **Vulkan**（クロスベンダーフォールバック） | プレビュー (Preview) | `inference/Dockerfile.vulkan` → `atlas-llama-vulkan` | `docker-compose.vulkan.yml` | lavapipe の CPU 起動パス（スモークテスト済み）。実 GPU での検証はまだなし |
 | **SYCL** (Intel Arc) | ロードマップ (Roadmap) — Intel Arc は現在 `vulkan` を使用 | 未定 | 未定 | — |
@@ -484,8 +484,6 @@ flowchart LR
 - 空白のみが異なるコピーが、インカムベントに取って代わることは決してありません。
 
 インカムベントが維持されるとき `phase_solved` は `incumbent` となり、プロキシはモデル自身のバイトを書き込みます。
-- 編集ルートでは、呼び出し元の `old_str`/`new_str` は、構造編集を除くすべてのバリアントで、差分としてインカムベント自身に適用されます。
-- インカムベントの記録が有効な契約と検証で閉じない限り、自動配信は何も書き込みません（CANDIDATE_POLICY.md）。
 
 **候補割り当て: CxGx ゲート**（`phase2` / `phase2_allocated` として送出）が、失敗したプローブに何個の候補を与えるかを決めます。プローブの C(x)+G(x) 合成スコア（埋め込み抽出1回、両モデルを使用）が2段階のルールを駆動します: キャリブレーション済みの C(x) 正規化エネルギーが、Budget Forcing と同じ梯子の上でベースティアを選び、G(x) の品質スコアがモデルのキャリブレーション済み severe 境界を下回るときにそのティアを +1、大きく下回る（その 0.75 倍）ときに +2 だけ引き上げます — プローブが C(x) には安く見えるのに G(x) には誤りに見えるケースです。ティアが k を決め（`nothink` 1、`standard` 3、`hard` 5、`extreme` 8）、そこに **k >= 3 のハードなフロア**が掛かります。したがってゲートは、以前ピン留めされていた k=3 に候補を追加することしかできず、減らすことはできません。最悪ケースが従来の挙動になります。どちらの信号もこのモデルのキャリブレーションファイル（`cx_normalization.json`、`gx_thresholds.json`）を必要とします: 未キャリブレーションのレンズ、またはレンズが拒否するプローブ（埋め込みバッチに対して長すぎる、空）は `standard` でちょうど k=3 を割り当てるため、未キャリブレーションのバンドルは、そのモデルにとって意味を持たない尺度でルーティングされるのではなく、従来どおりのパイプラインを走らせます。レンズがまったくスコアリングできない場合は、代わりに実行を停止します（[ADR 0011](../../adr/0011-the-lens-is-required.md)）。
 
@@ -503,12 +501,13 @@ flowchart LR
 
 | ティア | 思考トークン |
 |------|----------------|
-| nothink | 0 |
+| nothink | 0（テンプレートレベルの思考は無効） |
 | light | 1,024 |
 | standard | 2,048 |
 | hard | 4,096 |
 | extreme | 8,192 |
-ティア選択は、選択中のモデルのキャリブレーション済み C(x) エネルギーを使用します。キャリブレーションがない場合、ATLAS は別のモデルの定数を借りるのではなく、設定されたデフォルトの予算を使用します。
+
+各ティアは、システムプロンプト（direct 対 think-step-by-step）と最大トークン予算に対応付けられます。ティア選択は、選択中のモデルのキャリブレーション済み C(x) エネルギーを使用します。キャリブレーションがない場合、ATLAS は別のモデルの定数を借りるのではなく、設定されたデフォルトの予算を使用します。
 
 **フェーズ2: 検証と選択**
 
@@ -631,10 +630,6 @@ C(x) の正規化は `sigmoid(steepness × (energy - midpoint))` です。両方
 ---
 
 ## 6. サンドボックス
-書き込み可能なマウントは tmpfs で、言語エコシステムごとに1つ用意され、Docker はデフォルトでそれらを `noexec` でマウントします。`/home/sandbox/gobuild` が例外で、`exec` を持ちます — `go run` がネイティブバイナリを `GOTMPDIR` にリンクしてから実行するためです。デフォルトの `GOTMPDIR=/tmp` では、すべての `go run` が `fork/exec ...: permission denied` で失敗していました。コンパイル言語を追加するときは、そのツールチェーンがスクラッチディレクトリから実行されるかプロジェクトツリーから実行されるかを確認してください（`/workspace` は既に exec を許可しており、何も必要としません）。
-
-2つのワークスペースパスがあります: **`/execute`**（V3 候補テストパス）は `/tmp/sandbox` 配下のエフェメラルなスクラッチディレクトリ（tmpfs）を使い、**`/shell`**（エージェントの `run_command` ルート、およびバックグラウンドプロセスの `/jobs/*`）は `/workspace` に対して実行されます — Docker の `ATLAS_PROJECT_DIR`、または K3s の hostPath `${ATLAS_PROJECTS_DIR}` からバインドマウントされたプロジェクトルートで、プロキシが見るのと同じパスです。
-
 
 コンパイル、テスト、リントを伴う分離されたコード実行。
 
@@ -664,7 +659,7 @@ graph LR
     style support fill:#333,color:#fff
 ```
 
-受け付ける言語エイリアス: `py`/`python3`（Python）、`js`/`node`（JavaScript）、`ts`（TypeScript）、`golang`（Go）、`java`（Java）、`kt`/`kts`（Kotlin）、`rs`（Rust）、`c++`（C++）、`rb`（Ruby）、`php`（PHP）、`sh`/`shell`（Bash）。一般的な CLI ツールはイメージに焼き込まれており（`git`、`sqlite3`、`jq`、`patch`、`zip`/`unzip`、`xz`、`curl`）、加えてバイナリ検査用のツール（binutils 由来の `strings`、`objdump`、`readelf`、`nm`、および `file`、`xxd`）も含まれます — コンテナは読み取り専用ベース上で非 root として動作するため、タスクがシェルアウトする先はすべて事前にインストールされている必要があり、実行時に apt で入れることはできません。バイナリに対する `read_file` は生のバイト列ではなく、これらのツールへの案内を返します。最大実行時間: Docker デプロイでは300秒（compose がプロキシの `run_command` の5分上限に合わせて `MAX_EXECUTION_TIME=${ATLAS_SANDBOX_MAX_EXECUTION_TIME:-300}` を設定します; 素のコードのデフォルトは60秒）。メモリ、CPU、プロセス数の上限はコンテナレベルです: compose が `mem_limit ${ATLAS_SANDBOX_MEM:-4g}`、`cpus ${ATLAS_SANDBOX_CPUS:-2}`、`pids_limit ${ATLAS_SANDBOX_PIDS:-1024}` を設定し、`atlas init` はホストに応じた値（RAM とコア数の約 75%）を `.env` に書き込みます。2つのワークスペースパス: **`/execute`**（V3 候補テストパス）は `/tmp/sandbox`（tmpfs）下の一時的なスクラッチディレクトリを使用; **`/shell`**（エージェントの `run_command` ルート、加えてバックグラウンドプロセス向けの `/jobs/*`）は `/workspace` — `ATLAS_PROJECT_DIR`（Docker）または hostPath `${ATLAS_PROJECTS_DIR}`（K3s）からバインドマウントされたプロジェクトルートで、プロキシが見るのと同じパス — に対して実行します。
+受け付ける言語エイリアス: `py`/`python3`（Python）、`js`/`node`（JavaScript）、`ts`（TypeScript）、`golang`（Go）、`java`（Java）、`kt`/`kts`（Kotlin）、`rs`（Rust）、`c++`（C++）、`rb`（Ruby）、`php`（PHP）、`sh`/`shell`（Bash）。一般的な CLI ツールはイメージに焼き込まれており（`git`、`sqlite3`、`jq`、`patch`、`zip`/`unzip`、`xz`、`curl`）、加えてバイナリ検査用のツール（binutils 由来の `strings`、`objdump`、`readelf`、`nm`、および `file`、`xxd`）も含まれます — コンテナは読み取り専用ベース上で非 root として動作するため、タスクがシェルアウトする先はすべて事前にインストールされている必要があり、実行時に apt で入れることはできません。バイナリに対する `read_file` は生のバイト列ではなく、これらのツールへの案内を返します。最大実行時間: Docker デプロイでは300秒（compose がプロキシの `run_command` の5分上限に合わせて `MAX_EXECUTION_TIME=${ATLAS_SANDBOX_MAX_EXECUTION_TIME:-300}` を設定します; 素のコードのデフォルトは60秒）。メモリ、CPU、プロセス数の上限はコンテナレベルです: compose が `mem_limit ${ATLAS_SANDBOX_MEM:-4g}`、`cpus ${ATLAS_SANDBOX_CPUS:-2}`、`pids_limit ${ATLAS_SANDBOX_PIDS:-1024}` を設定し、`atlas init` はホストに応じた値（RAM とコア数の約 75%）を `.env` に書き込みます。書き込み可能なマウントは tmpfs で、言語エコシステムごとに1つ用意され、Docker はデフォルトでそれらを `noexec` でマウントします。`/home/sandbox/gobuild` が例外で `exec` を持ちます — `go run` がネイティブバイナリを `GOTMPDIR` にリンクしてから実行するためです。デフォルトの `GOTMPDIR=/tmp` では、すべての `go run` が `fork/exec ...: permission denied` で失敗していました。コンパイル言語を追加するときは、そのツールチェーンがスクラッチディレクトリから実行されるかプロジェクトツリーから実行されるかを確認してください（`/workspace` は既に exec を許可しており、何も必要としません）。2つのワークスペースパス: **`/execute`**（V3 候補テストパス）は `/tmp/sandbox`（tmpfs）下の一時的なスクラッチディレクトリを使用; **`/shell`**（エージェントの `run_command` ルート、加えてバックグラウンドプロセス向けの `/jobs/*`）は `/workspace` — `ATLAS_PROJECT_DIR`（Docker）または hostPath `${ATLAS_PROJECTS_DIR}`（K3s）からバインドマウントされたプロジェクトルートで、プロキシが見るのと同じパス — に対して実行します。
 
 ---
 
