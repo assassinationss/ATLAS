@@ -1621,8 +1621,8 @@ build_asa_steering_vector() {
         return
     fi
     if [[ -f "$vector_path" ]] && [[ -s "$vector_path" ]]; then
-        if command -v atlas >/dev/null 2>&1 && \
-           ATLAS_CONTROL_VECTOR="$vector_path" atlas asa check --no-color \
+        if run_as_target sh -c 'command -v atlas >/dev/null 2>&1' && \
+           run_as_target env ATLAS_CONTROL_VECTOR="$vector_path" atlas asa check --no-color \
              >> "$ATLAS_RUN_DIR/atlas-asa-build.log" 2>&1; then
             log_ok "Compatible ASA steering vector already present ($(du -h "$vector_path" 2>/dev/null | cut -f1)) — skipping build"
             return
@@ -1730,7 +1730,7 @@ run_doctor() {
     local install_dir="${ATLAS_INSTALL_DIR:-$(pwd)}"
     local doctor_out doctor_rc
     set +e
-    doctor_out=$(cd "$install_dir" && python3 -m atlas.commands.doctor --quick --no-color 2>&1)
+    doctor_out=$(run_as_target sh -c "cd '$install_dir' && python3 -m atlas.commands.doctor --quick --no-color" 2>&1)
     doctor_rc=$?
     set -e
 
