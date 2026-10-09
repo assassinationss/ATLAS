@@ -189,6 +189,11 @@ jobs:
 
               test "$(stat -c %U /work)" = atlas-user \
                 || { echo "::error::checkout is not owned by atlas-user"; exit 1; }
+              # No file at any depth may be left behind as root (issue #412:
+              # run_doctor and the vector check used to run as root).
+              bad_owner=$(find /work ! -user atlas-user -print -quit)
+              test -z "$bad_owner" \
+                || { echo "::error::file not owned by atlas-user: $bad_owner"; exit 1; }
               test -x /home/atlas-user/.local/bin/atlas \
                 || { echo "::error::atlas CLI was not installed for atlas-user"; exit 1; }
               test -x /home/atlas-user/.local/bin/atlas-tui \
